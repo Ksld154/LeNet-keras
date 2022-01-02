@@ -3,8 +3,9 @@ import keras
 
 
 class LeNet(models.Sequential):
-    def __init__(self, input_shape, nb_classes):
-        super().__init__()
+    def __init__(self, input_shape, nb_classes, name):
+        super().__init__(name=name)
+        # self.name = name
 
         self.add(
             layers.Conv2D(6,
