@@ -1,20 +1,21 @@
-# from concurrent import futures
-# import threading
 from data import CIFAR10
 from lenet import LeNet
 from transmitter import Transmitter
-# from threading import Thread
-import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import logging, os
+import datetime, time
+from concurrent.futures import ThreadPoolExecutor
 import tensorflow as tf
 import tensorflow.keras as keras
 
-RESULT_PATH = 'result.txt'
+# RESULT_PATH = 'result.txt'
 
 BATCH_SIZE = 64
 EPOCHS = 10
+
+PRE_EPOCHS = 12
 LOSS_THRESHOLD = 0.1
-PRE_EPOCHS = 2
+CONSECUTIVE_EPOCH_THRESHOLD = 3
+
 TENSOR_TRANSMISSION_TIME = 30
 FREEZE_OPTIONS = [0, 2, 4, 6, 7]
 
@@ -23,55 +24,59 @@ class Client():
     def __init__(self) -> None:
         self.base_freeze_idx = 0
         self.next_freeze_idx = 1
-        self.loss_history = []
-        self.accuracy_history = []
+        self.consecutive_frozen_epochs = 0
+        # self.loss_history = []
+        # self.accuracy_history = []
 
-    def train_process(self):
+        self.base_accuracy = []
+        self.base_loss = []
+        self.target_accuracy = []
+        self.target_loss = []
+        self.layer_dicisions = []
+
+    def train_process(self, dry_run=False, parallel_transmit=False):
         data = CIFAR10(BATCH_SIZE)
 
+        # do some pre-training before freezing
         base_model = LeNet(data.input_shape, data.num_classes, "Base")
         base_trainer = Trainer(base_model, data, self.base_freeze_idx, True)
-        # next_model = LeNet(data.input_shape, data.num_classes, "Next")
-        # next_trainer = Trainer(next_model, data, self.base_freeze_idx, True)
-
-        # do some pre-training before freezing
         for e in range(PRE_EPOCHS):
             print(f'[Pre-Training Epoch {e}]')
-            base_trainer.train_epoch()
-            # next_trainer.train_epoch()
-        # for l in range(self.next_freeze_idx):
-        #     next_trainer.get_model().layers[l].trainable = False
-        # next_trainer.get_model().summary()
+            loss_1, acc_1 = base_trainer.train_epoch()
+            self.base_loss.append(loss_1)
+            self.base_accuracy.append(acc_1)
+            self.target_loss.append(None)
+            self.target_accuracy.append(None)
+
+        if dry_run:
+            print(self.base_accuracy)
+            print(self.base_loss)
+            return
+
+        # Initailize target_model with all-layers pre-trained base model
         base_weights = base_trainer.get_model().get_weights()
         next_model = keras.models.clone_model(base_trainer.get_model())
         next_model._name = "Next"
         next_model.set_weights(base_weights)
         next_trainer = Trainer(next_model, data, self.next_freeze_idx, True)
 
-        # next_model = LeNet(data.input_shape, data.num_classes, "Next")
-        # base_trainer = Trainer(base_model, data, self.base_freeze_idx, True)
-        # next_trainer = Trainer(next_model, data, self.next_freeze_idx, True)
-        # base_model.summary()
-
-        # In each epochs
+        # In each training epochs
         for e in range(EPOCHS):
             print(f'[Epoch {e}] Base freeze layers: {self.base_freeze_idx}')
             print(f'[Epoch {e}] Next freeze layers: {self.next_freeze_idx}')
-            # base_trainer.recompile = False
-            # next_trainer.recompile = False
 
-            ## [TODO] suppose to pass base_loss to central server here?
+            ## pass base_loss to central server?
             loss_1, acc_1 = base_trainer.train_epoch()
             print(f'Starting Transmitting tensors...')
             t1 = Transmitter(TENSOR_TRANSMISSION_TIME)
             t1.start()
 
-            # loss_2, acc_2 = next_trainer.train_epoch(False)
+            # train target_model on background thread
             future = ''
             with ThreadPoolExecutor(max_workers=1) as executor:
                 future = executor.submit(next_trainer.train_epoch)
 
-            ## [TODO] suppose to receive model update from central around here?
+            ## Receive model update from central around here?
             t1.join()
             print(f'Tensor transmission done !')
 
@@ -80,42 +85,62 @@ class Client():
                 print(future.result())
                 loss_2, acc_2 = future.result()
             else:
-                # next trainer is not ready, so we will not wait for it and discard it's result
+                # next_trainer is not ready, so we will not wait for it and discard it's result
                 continue
+
+            self.base_loss.append(loss_1)
+            self.base_accuracy.append(acc_1)
+            self.target_loss.append(loss_2)
+            self.target_accuracy.append(acc_2)
+            self.layer_dicisions.append(self.base_freeze_idx)
 
             # Switch to new model
             if e >= 0 and abs(loss_2 - loss_1) <= LOSS_THRESHOLD:
-                print(f'Loss Diff.:{loss_2-loss_1}, use new model')
-                self.base_freeze_idx += 1
-                self.next_freeze_idx += 1
-                if self.next_freeze_idx >= len(
-                        FREEZE_OPTIONS) or self.base_freeze_idx >= len(
-                            FREEZE_OPTIONS):
-                    continue
+                print(f'Loss Diff.:{loss_2-loss_1}, is lower than threshold')
+                self.consecutive_frozen_epochs += 1
 
-                next_trainer.get_model()._name = "Base"
-                base_trainer = Trainer(
-                    model=next_trainer.get_model(),
-                    data=data,
-                    freeze_layers=FREEZE_OPTIONS[self.base_freeze_idx],
-                    recompile=True)
+                if self.consecutive_frozen_epochs >= 3:
+                    print(
+                        f'Loss Diff.:{loss_2-loss_1}, threshold satisfied and use new model'
+                    )
+                    self.consecutive_frozen_epochs = 0
 
-                # [TODO] the weight is not preserved!!!
-                base_weights = next_trainer.get_model().get_weights()
-                new_next_model = keras.models.clone_model(
-                    next_trainer.get_model())
-                new_next_model.set_weights(base_weights)
-                new_next_model._name = "Next"
-                next_trainer = Trainer(
-                    model=new_next_model,
-                    data=data,
-                    freeze_layers=FREEZE_OPTIONS[self.next_freeze_idx],
-                    recompile=True)
-                # base_trainer.get_model().summary()
-                # next_trainer.get_model().summary()
+                    if self.next_freeze_idx >= len(
+                            FREEZE_OPTIONS) - 1 or self.base_freeze_idx >= len(
+                                FREEZE_OPTIONS) - 1:
+                        continue
 
-        print(self.loss_history)
-        print(self.accuracy_history)
+                    self.base_freeze_idx += 1
+                    self.next_freeze_idx += 1
+
+                    next_trainer.get_model()._name = "Base"
+                    base_trainer = Trainer(
+                        model=next_trainer.get_model(),
+                        data=data,
+                        freeze_layers=FREEZE_OPTIONS[self.base_freeze_idx],
+                        recompile=True)
+
+                    # [TODO] the weight is not preserved!!!
+                    base_weights = next_trainer.get_model().get_weights()
+                    new_next_model = keras.models.clone_model(
+                        next_trainer.get_model())
+                    new_next_model.set_weights(base_weights)
+                    new_next_model._name = "Next"
+                    next_trainer = Trainer(
+                        model=new_next_model,
+                        data=data,
+                        freeze_layers=FREEZE_OPTIONS[self.next_freeze_idx],
+                        recompile=True)
+                    # base_trainer.get_model().summary()
+                    # next_trainer.get_model().summary()
+
+        # print(self.loss_history)
+        # print(self.accuracy_history)
+        print(self.base_accuracy)
+        print(self.target_accuracy)
+        print(self.base_loss)
+        print(self.target_loss)
+        print(self.layer_dicisions)
 
 
 class Trainer():
@@ -154,71 +179,20 @@ class Trainer():
         return self.model
 
 
-def train_lenet():
-    pass
-    # tf.get_logger().setLevel('INFO')
-
-    # # data = Batch_DATA(BATCH_SIZE)
-    # data = CIFAR10(BATCH_SIZE)
-
-    # all_loss = []
-    # all_acc = []
-
-    # for freeze_layers in FREEZE_OPTIONS:
-    #     loss_history = []
-    #     accuracy_history = []
-    #     freezed = False
-
-    #     model = LeNet(data.input_shape, data.num_classes)
-    #     model.summary()
-
-    #     # In each epochs
-    #     for e in range(EPOCHS):
-    #         print(f'Epoch {e}:')
-
-    #         # In each batch
-    #         for x, y in zip(data.x_train_batch, data.y_train_batch):
-    #             model.train_on_batch(x, y)
-    #         score = model.evaluate(data.x_test,
-    #                                data.y_test,
-    #                                batch_size=BATCH_SIZE)
-    #         loss_history.append(score[0])
-    #         accuracy_history.append(score[1])
-
-    #         if e >= 1 and not freezed:
-    #             freezed = True
-
-    #             # freeze 1st conv2D layers
-    #             for i in range(freeze_layers):
-    #                 print(f'Freeze layer: {model.layers[i].name}')
-    #                 model.layers[i].trainable = False
-
-    #             model.compile(loss=tf.keras.losses.categorical_crossentropy,
-    #                           optimizer='SGD',
-    #                           metrics=['accuracy'])
-
-    #     print(loss_history)
-    #     print(accuracy_history)
-    #     all_loss.append(loss_history)
-    #     all_acc.append(accuracy_history)
-
-    # print(all_loss)
-    # print(all_acc)
-
-    # with open(RESULT_PATH, 'w+', encoding='utf-8') as f:
-    #     f.write(', '.join(str(e) for e in all_loss))
-    #     f.write(', '.join(str(e) for e in all_acc))
-    #     f.write('********************')
-
-
 if __name__ == '__main__':
     # train_lenet()
 
     tf.get_logger().setLevel(logging.WARNING)
-    # tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.WARN)
     tf.autograph.set_verbosity(logging.WARNING)
     logging.getLogger('tensorflow').setLevel(logging.WARNING)
     logging.getLogger('tensorflow').disabled = True
+    os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
+    print(f'*** Start Training! ***')
+    start = time.time()
     client_1 = Client()
-    client_1.train_process()
+    # client_1.train_process()
+    client_1.train_process(True)
+
+    end = time.time()
+    print(f'Total training time: {datetime.timedelta(seconds= end-start)}')
