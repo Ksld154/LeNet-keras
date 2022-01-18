@@ -39,5 +39,5 @@ class LeNet(models.Sequential):
         self.add(layers.Dense(nb_classes, activation='softmax'))
 
         self.compile(loss=keras.losses.categorical_crossentropy,
-                     optimizer='Adam',
+                     optimizer='SGD',
                      metrics=['accuracy'])

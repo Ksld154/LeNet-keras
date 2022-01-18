@@ -3,16 +3,19 @@ from lenet import LeNet
 from transmitter import Transmitter
 import logging, os
 import datetime, time
+import argparse
 from concurrent.futures import ThreadPoolExecutor
+
 import tensorflow as tf
 import tensorflow.keras as keras
+from tensorflow.keras import backend as k
 
 # RESULT_PATH = 'result.txt'
 
 BATCH_SIZE = 64
-EPOCHS = 10
+EPOCHS = 5
 
-PRE_EPOCHS = 12
+PRE_EPOCHS = 2
 LOSS_THRESHOLD = 0.1
 CONSECUTIVE_EPOCH_THRESHOLD = 3
 
@@ -20,33 +23,110 @@ TENSOR_TRANSMISSION_TIME = 30
 FREEZE_OPTIONS = [0, 2, 4, 6, 7]
 
 
+def opt_parser():
+    usage = 'Trains and tests a Gradual layer freezing LeNet-5 model with CIFAR10.'
+    parser = argparse.ArgumentParser(description=usage)
+
+    parser.add_argument(
+        '-o',
+        '--overlap',
+        default=True,
+        dest='transmission_overlap',
+        help=
+        'Transmission overlap with next model training (default: %(default)s)',
+        action=argparse.BooleanOptionalAction)
+    parser.add_argument('-d',
+                        '--dryrun',
+                        default=False,
+                        dest='dry_run',
+                        help='Only do pre-training (default: %(default)s)',
+                        action=argparse.BooleanOptionalAction)
+    parser.add_argument('-a',
+                        '--all',
+                        default=False,
+                        dest='all_experiments',
+                        help='Do 3 experiments at once (default: %(default)s)',
+                        action=argparse.BooleanOptionalAction)
+    parser.add_argument(
+        '-t',
+        '--transmission-time',
+        default=30,
+        type=int,
+        dest='transmission_time',
+        help='Mock tensor transmission time (default: %(default)s)')
+    parser.add_argument('-e',
+                        '--epochs',
+                        default=10,
+                        type=int,
+                        help='Training epoches (default: %(default))')
+    return parser.parse_args()
+
+
 class Client():
     def __init__(self) -> None:
         self.base_freeze_idx = 0
         self.next_freeze_idx = 1
         self.consecutive_frozen_epochs = 0
-        # self.loss_history = []
-        # self.accuracy_history = []
 
         self.base_accuracy = []
         self.base_loss = []
         self.target_accuracy = []
         self.target_loss = []
         self.layer_dicisions = []
+        self.data = CIFAR10(BATCH_SIZE)
 
-    def train_process(self, dry_run=False, parallel_transmit=False):
-        data = CIFAR10(BATCH_SIZE)
+        self.base_loss_delta = []
+        self.target_loss_delta = []
+        self.base_weights = []
+        self.target_weights = []
+        self.base_grads = []
+        self.target_grads = []
+
+    def train_process(self, transmission_overlap, dry_run, transmission_time,
+                      epochs):
+        self.base_freeze_idx = 0
+        self.next_freeze_idx = 1
+        self.consecutive_frozen_epochs = 0
+        self.base_accuracy.clear()
+        self.base_loss.clear()
+        self.target_accuracy.clear()
+        self.target_loss.clear()
+        self.layer_dicisions.clear()
+        self.base_loss_delta.clear()
+        self.target_loss_delta.clear()
+        self.base_weights.clear()
+        self.target_weights.clear()
+        self.base_grads.clear()
+        self.target_grads.clear()
+
+        print(f'Overlap: {transmission_overlap}')
+        print(f'Dry_run: {dry_run}')
+        print(f'Total epochs: {epochs}')
+
+        pre_epochs = PRE_EPOCHS
+        if dry_run:
+            pre_epochs = 12
 
         # do some pre-training before freezing
-        base_model = LeNet(data.input_shape, data.num_classes, "Base")
-        base_trainer = Trainer(base_model, data, self.base_freeze_idx, True)
-        for e in range(PRE_EPOCHS):
+        base_model = LeNet(self.data.input_shape, self.data.num_classes,
+                           "Base")
+        base_trainer = Trainer(base_model, self.data, self.base_freeze_idx,
+                               True)
+        for e in range(pre_epochs):
             print(f'[Pre-Training Epoch {e}]')
             loss_1, acc_1 = base_trainer.train_epoch()
+
+            if e == 0:
+                self.base_loss_delta.append(None)
+            else:
+                b_delta_loss = loss_1 - self.base_loss[-1]
             self.base_loss.append(loss_1)
             self.base_accuracy.append(acc_1)
             self.target_loss.append(None)
             self.target_accuracy.append(None)
+            self.target_loss_delta.append(None)
+            self.base_weights.append(None)
+            self.target_weights.append(None)
 
         if dry_run:
             print(self.base_accuracy)
@@ -58,44 +138,76 @@ class Client():
         next_model = keras.models.clone_model(base_trainer.get_model())
         next_model._name = "Next"
         next_model.set_weights(base_weights)
-        next_trainer = Trainer(next_model, data, self.next_freeze_idx, True)
+        next_trainer = Trainer(next_model, self.data, self.next_freeze_idx,
+                               True)
 
         # In each training epochs
-        for e in range(EPOCHS):
+        for e in range(epochs):
             print(f'[Epoch {e}] Base freeze layers: {self.base_freeze_idx}')
             print(f'[Epoch {e}] Next freeze layers: {self.next_freeze_idx}')
 
             ## pass base_loss to central server?
             loss_1, acc_1 = base_trainer.train_epoch()
-            print(f'Starting Transmitting tensors...')
-            t1 = Transmitter(TENSOR_TRANSMISSION_TIME)
-            t1.start()
 
-            # train target_model on background thread
-            future = ''
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(next_trainer.train_epoch)
+            if transmission_overlap:
+                print(f'[BG] Starting Transmitting tensors...')
+                t1 = Transmitter(transmission_time)
+                t1.start()
 
-            ## Receive model update from central around here?
-            t1.join()
-            print(f'Tensor transmission done !')
+                # train target_model on background thread
+                future = ''
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(next_trainer.train_epoch)
 
-            # check if t2 is finish
-            if future.done():
-                print(future.result())
-                loss_2, acc_2 = future.result()
+                ## Receive model update from central around here?
+                t1.join()
+                print(f'Tensor transmission done !')
+
+                # check if t2 is finish
+                if future.done():
+                    print(future.result())
+                    loss_2, acc_2 = future.result()
+                else:
+                    # next_trainer is not ready, so we will not wait for it and discard it's result
+                    continue
+
+            # tranmission is done after next_trainer is trained
             else:
-                # next_trainer is not ready, so we will not wait for it and discard it's result
-                continue
+                # train target model first
+                loss_2, acc_2 = next_trainer.train_epoch()
+
+                # simulate transmission only after target model training is finished
+                print(f'[FG] Starting Transmitting tensors...')
+                t1 = Transmitter(transmission_time)
+                t1.start()
+                t1.join()
+                print(f'Tensor transmission done !')
+
+            if self.base_loss[-1] != None:
+                b_delta_loss = loss_1 - self.base_loss[-1]
+            else:
+                t_delta_loss = None
+
+            if self.target_loss[-1] != None:
+                t_delta_loss = loss_2 - self.target_loss[-1]
+            else:
+                t_delta_loss = None
 
             self.base_loss.append(loss_1)
             self.base_accuracy.append(acc_1)
             self.target_loss.append(loss_2)
             self.target_accuracy.append(acc_2)
             self.layer_dicisions.append(self.base_freeze_idx)
+            self.base_loss_delta.append(b_delta_loss)
+            self.target_loss_delta.append(t_delta_loss)
+
+            self.save_layer_weights(base_trainer, next_trainer)
+            self.save_gradients(base_trainer, next_trainer)
 
             # Switch to new model
-            if e >= 0 and abs(loss_2 - loss_1) <= LOSS_THRESHOLD:
+            # if e >= 0 and abs(loss_2 - loss_1) <= LOSS_THRESHOLD:
+            if e >= 0 and loss_2 - loss_1 <= LOSS_THRESHOLD:
+
                 print(f'Loss Diff.:{loss_2-loss_1}, is lower than threshold')
                 self.consecutive_frozen_epochs += 1
 
@@ -116,7 +228,7 @@ class Client():
                     next_trainer.get_model()._name = "Base"
                     base_trainer = Trainer(
                         model=next_trainer.get_model(),
-                        data=data,
+                        data=self.data,
                         freeze_layers=FREEZE_OPTIONS[self.base_freeze_idx],
                         recompile=True)
 
@@ -128,19 +240,46 @@ class Client():
                     new_next_model._name = "Next"
                     next_trainer = Trainer(
                         model=new_next_model,
-                        data=data,
+                        data=self.data,
                         freeze_layers=FREEZE_OPTIONS[self.next_freeze_idx],
                         recompile=True)
                     # base_trainer.get_model().summary()
                     # next_trainer.get_model().summary()
 
-        # print(self.loss_history)
-        # print(self.accuracy_history)
         print(self.base_accuracy)
         print(self.target_accuracy)
         print(self.base_loss)
         print(self.target_loss)
         print(self.layer_dicisions)
+
+        print(self.base_loss_delta)
+        print(self.target_loss_delta)
+        print(self.base_weights)
+        print(self.target_weights)
+        print(self.base_grads)
+        print(self.target_grads)
+
+    def save_layer_weights(self, trainer, input, output):
+        base_layer_weights = base_trainer.get_model().get_weights()[
+            FREEZE_OPTIONS[self.base_freeze_idx]]
+        next_layer_weights = next_trainer.get_model().get_weights()[
+            FREEZE_OPTIONS[self.base_freeze_idx]]
+
+        b_layer_sum = base_layer_weights.sum()
+        t_layer_sum = next_layer_weights.sum()
+        self.base_weights.append(b_layer_sum)
+        self.target_weights.append(t_layer_sum)
+
+    def save_gradients(self, base_trainer, next_trainer):
+        b_model = base_trainer.get_model()
+        grads = b_model.optimizer.get_gradients(b_model.total_loss,
+                                                b_model.trainable_weights)
+        self.base_grads.append(grads)
+
+        t_model = next_trainer.get_model()
+        grads2 = t_model.optimizer.get_gradients(t_model.total_loss,
+                                                 t_model.trainable_weights)
+        self.target_grads.append(grads2)
 
 
 class Trainer():
@@ -159,7 +298,7 @@ class Trainer():
             self.model.compile(loss=tf.keras.losses.categorical_crossentropy,
                                optimizer='SGD',
                                metrics=['accuracy'])
-            self.model.summary()
+            # self.model.summary()
 
     def train_epoch(self):
         # train each batch
@@ -170,6 +309,9 @@ class Trainer():
         score = self.model.evaluate(self.data.x_test,
                                     self.data.y_test,
                                     batch_size=BATCH_SIZE)
+
+        # model.get
+        # gradients = k.gradients(outputTensor, listOfVariableTensors)
         self.loss_history.append(score[0])
         self.accuracy_history.append(score[1])
 
@@ -180,19 +322,31 @@ class Trainer():
 
 
 if __name__ == '__main__':
-    # train_lenet()
-
-    tf.get_logger().setLevel(logging.WARNING)
-    tf.autograph.set_verbosity(logging.WARNING)
-    logging.getLogger('tensorflow').setLevel(logging.WARNING)
-    logging.getLogger('tensorflow').disabled = True
     os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+    args = opt_parser()
 
     print(f'*** Start Training! ***')
     start = time.time()
     client_1 = Client()
-    # client_1.train_process()
-    client_1.train_process(True)
+
+    if args.all_experiments:
+        client_1.train_process(transmission_overlap=True,
+                               dry_run=True,
+                               transmission_time=args.transmission_time,
+                               epochs=args.epochs)  # dry run (baseline)
+        client_1.train_process(transmission_overlap=True,
+                               dry_run=False,
+                               transmission_time=args.transmission_time,
+                               epochs=args.epochs)  # Overlap
+        client_1.train_process(transmission_overlap=False,
+                               dry_run=False,
+                               transmission_time=args.transmission_time,
+                               epochs=args.epochs)  # Non-Overlap
+    else:
+        client_1.train_process(transmission_overlap=args.transmission_overlap,
+                               dry_run=args.dry_run,
+                               transmission_time=args.transmission_time,
+                               epochs=args.epochs)
 
     end = time.time()
     print(f'Total training time: {datetime.timedelta(seconds= end-start)}')

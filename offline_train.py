@@ -1,6 +1,6 @@
 from data import CIFAR10
 from lenet import LeNet
-import logging
+import logging, time, datetime
 
 import tensorflow as tf
 
@@ -13,11 +13,15 @@ PRE_EPOCHS = 2
 FREEZE_OPTIONS = [0, 2, 4, 6, 7]
 # TENSOR_TRANSMISSION_TIME = 30
 
+import os
+
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = "2"
+
 
 def train_lenet():
     tf.get_logger().setLevel('INFO')
 
-    # data = Batch_DATA(BATCH_SIZE)
     data = CIFAR10(BATCH_SIZE)
 
     all_loss = []
@@ -28,7 +32,7 @@ def train_lenet():
         accuracy_history = []
         freezed = False
 
-        model = LeNet(data.input_shape, data.num_classes)
+        model = LeNet(data.input_shape, data.num_classes, "base")
         model.summary()
 
         # In each epochs
@@ -68,3 +72,12 @@ def train_lenet():
         f.write(', '.join(str(e) for e in all_loss))
         f.write(', '.join(str(e) for e in all_acc))
         f.write('********************')
+
+
+if __name__ == '__main__':
+
+    print(f'*** Start Training! ***')
+    start = time.time()
+    train_lenet()
+    end = time.time()
+    print(f'Total training time: {datetime.timedelta(seconds= end-start)}')
