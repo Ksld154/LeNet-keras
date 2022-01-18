@@ -17,7 +17,8 @@ class LeNet(models.Sequential):
         self.add(
             layers.AveragePooling2D(pool_size=(2, 2),
                                     strides=(1, 1),
-                                    padding='valid'))
+                                    padding='valid',
+                                    trainable=False))
         self.add(
             layers.Conv2D(16,
                           kernel_size=(5, 5),
@@ -27,14 +28,15 @@ class LeNet(models.Sequential):
         self.add(
             layers.AveragePooling2D(pool_size=(2, 2),
                                     strides=(2, 2),
-                                    padding='valid'))
+                                    padding='valid',
+                                    trainable=False))
         self.add(
             layers.Conv2D(120,
                           kernel_size=(5, 5),
                           strides=(1, 1),
                           activation='ReLU',
                           padding='valid'))
-        self.add(layers.Flatten())
+        self.add(layers.Flatten(trainable=False))
         self.add(layers.Dense(84, activation='ReLU'))
         self.add(layers.Dense(nb_classes, activation='softmax'))
 

@@ -1,3 +1,4 @@
+from numpy import gradient
 from data import CIFAR10
 from lenet import LeNet
 from transmitter import Transmitter
@@ -6,6 +7,7 @@ import datetime, time
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 
+import numpy as np
 import tensorflow as tf
 import tensorflow.keras as keras
 from tensorflow.keras import backend as k
@@ -127,6 +129,8 @@ class Client():
             self.target_loss_delta.append(None)
             self.base_weights.append(None)
             self.target_weights.append(None)
+            # self.base_grads.append(base_trainer.gradients)
+            print(base_trainer.gradients)
 
         if dry_run:
             print(self.base_accuracy)
@@ -202,7 +206,7 @@ class Client():
             self.target_loss_delta.append(t_delta_loss)
 
             self.save_layer_weights(base_trainer, next_trainer)
-            self.save_gradients(base_trainer, next_trainer)
+            # self.save_gradients(base_trainer, next_trainer, loss_1, loss_2)
 
             # Switch to new model
             # if e >= 0 and abs(loss_2 - loss_1) <= LOSS_THRESHOLD:
@@ -259,27 +263,16 @@ class Client():
         print(self.base_grads)
         print(self.target_grads)
 
-    def save_layer_weights(self, trainer, input, output):
+    def save_layer_weights(self, base_trainer, next_trainer):
         base_layer_weights = base_trainer.get_model().get_weights()[
             FREEZE_OPTIONS[self.base_freeze_idx]]
         next_layer_weights = next_trainer.get_model().get_weights()[
             FREEZE_OPTIONS[self.base_freeze_idx]]
 
-        b_layer_sum = base_layer_weights.sum()
-        t_layer_sum = next_layer_weights.sum()
+        b_layer_sum = np.sum(base_layer_weights**2)
+        t_layer_sum = np.sum(next_layer_weights**2)
         self.base_weights.append(b_layer_sum)
         self.target_weights.append(t_layer_sum)
-
-    def save_gradients(self, base_trainer, next_trainer):
-        b_model = base_trainer.get_model()
-        grads = b_model.optimizer.get_gradients(b_model.total_loss,
-                                                b_model.trainable_weights)
-        self.base_grads.append(grads)
-
-        t_model = next_trainer.get_model()
-        grads2 = t_model.optimizer.get_gradients(t_model.total_loss,
-                                                 t_model.trainable_weights)
-        self.target_grads.append(grads2)
 
 
 class Trainer():
@@ -291,6 +284,7 @@ class Trainer():
 
         self.loss_history = []
         self.accuracy_history = []
+        self.gradients = []
 
         if self.recompile:
             for l in range(self.freeze_layers):
@@ -305,13 +299,11 @@ class Trainer():
         for x, y in zip(self.data.x_train_batch, self.data.y_train_batch):
             self.model.train_on_batch(x, y)
 
-        # evaluate the model result for this epoch
         score = self.model.evaluate(self.data.x_test,
                                     self.data.y_test,
                                     batch_size=BATCH_SIZE)
 
         # model.get
-        # gradients = k.gradients(outputTensor, listOfVariableTensors)
         self.loss_history.append(score[0])
         self.accuracy_history.append(score[1])
 
