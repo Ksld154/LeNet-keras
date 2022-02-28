@@ -3,5 +3,5 @@
     "python.linting.enabled": true,
     "python.envFile": "${workspaceFolder}/dev.env",
     "editor.formatOnSave": true,
-    "python.formatting.provider": "yapf"
+    // "python.formatting.provider": "yapf"
 }

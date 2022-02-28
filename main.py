@@ -3,8 +3,10 @@ from numpy import gradient
 from data import CIFAR10
 from lenet import LeNet
 from transmitter import Transmitter
-import logging, os
-import datetime, time
+import logging
+import os
+import datetime
+import time
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 
@@ -17,16 +19,15 @@ import myplot
 # RESULT_PATH = 'result.txt'
 
 BATCH_SIZE = 64
-EPOCHS = 5
-
 PRE_EPOCHS = 2
-CONSECUTIVE_EPOCH_THRESHOLD = 3
-
-LOSS_THRESHOLD = 0.05
-MOVING_AVERAGE_WINDOW_SIZE = 3
 
 TENSOR_TRANSMISSION_TIME = 30
 FREEZE_OPTIONS = [0, 2, 4, 6, 7]
+
+
+MOVING_AVERAGE_WINDOW_SIZE = 7
+LOSS_COVERGED_THRESHOLD = 0.01
+LOSS_DIFF_THRESHOLD = 0.01
 
 
 def opt_parser():
@@ -38,8 +39,7 @@ def opt_parser():
         '--overlap',
         default=True,
         dest='transmission_overlap',
-        help=
-        'Transmission overlap with next model training (default: %(default)s)',
+        help='Transmission overlap with next model training (default: %(default)s)',
         action=argparse.BooleanOptionalAction)
     parser.add_argument('-d',
                         '--dryrun',
@@ -65,6 +65,13 @@ def opt_parser():
                         default=10,
                         type=int,
                         help='Training epoches (default: %(default))')
+    parser.add_argument('-s',
+                        '--switch_model',
+                        default=True,
+                        dest='switch_model',
+                        help='Enable model switching (default: %(default)s)',
+                        action=argparse.BooleanOptionalAction)
+
     return parser.parse_args()
 
 
@@ -80,9 +87,10 @@ class Client():
         self.t2 = ''
 
     def train_process(self, transmission_overlap, dry_run, transmission_time,
-                      epochs):
+                      epochs, switch_model):
         self.base_freeze_idx = 0
         self.next_freeze_idx = 1
+        both_converged = False
 
         print(f'Overlap: {transmission_overlap}')
         print(f'Dry_run: {dry_run}')
@@ -129,7 +137,7 @@ class Client():
                 f'[Epoch {(e+1)}/{epochs}] Next freeze layers: {self.next_freeze_idx}'
             )
 
-            ## pass base_loss to central server?
+            # pass base_loss to central server?
             loss_1, acc_1 = base_trainer.train_epoch()
 
             if transmission_overlap:
@@ -142,7 +150,7 @@ class Client():
                 with ThreadPoolExecutor(max_workers=1) as executor:
                     future = executor.submit(next_trainer.train_epoch)
 
-                ## Receive model update from central around here?
+                # Receive model update from central around here?
                 t1.join()
                 print(f'Tensor transmission done !')
 
@@ -171,21 +179,22 @@ class Client():
             next_trainer.save_layer_weights(self.base_freeze_idx)
 
             self.loss_diff.append(loss_2 - loss_1)
-            diff_ma = self.get_moving_average()
+            diff_ma = self.moving_average(self.loss_diff)
             print(diff_ma)
 
+            if self.is_coverged(base_trainer) and self.is_coverged(next_trainer):
+                print('*** Both model are converged! ***')
+                both_converged = True
+
             # Switch to new model
-            if not np.isinf(diff_ma) and diff_ma <= LOSS_THRESHOLD:
+            if switch_model and both_converged and not np.isnan(diff_ma) and diff_ma <= LOSS_DIFF_THRESHOLD:
                 self.loss_diff.clear()
 
                 print(f'Loss Diff.:{loss_2-loss_1}, is lower than threshold')
                 print(
-                    f'Loss Diff.:{loss_2-loss_1}, threshold satisfied and use new model'
-                )
+                    f'Loss Diff.:{loss_2-loss_1}, threshold satisfied and use new model')
 
-                if self.next_freeze_idx >= len(
-                        FREEZE_OPTIONS) - 1 or self.base_freeze_idx >= len(
-                            FREEZE_OPTIONS) - 1:
+                if self.next_freeze_idx >= len(FREEZE_OPTIONS) - 1 or self.base_freeze_idx >= len(FREEZE_OPTIONS) - 1:
                     continue
 
                 self.base_freeze_idx += 1
@@ -223,12 +232,52 @@ class Client():
         self.t1 = base_trainer
         self.t2 = next_trainer
 
-    def get_moving_average(self):
-        W = MOVING_AVERAGE_WINDOW_SIZE
-        if len(self.loss_diff) < W:
-            return np.inf
+    def setup_and_pretrain(self, dry_run):
+        pre_epochs = PRE_EPOCHS
+        if dry_run:
+            pre_epochs = 12
 
-        return sum(self.loss_diff[-W:]) / W
+        # do some pre-training before freezing
+        base_model = LeNet(self.data.input_shape, self.data.num_classes,
+                           "Base")
+        base_trainer = Trainer(base_model, self.data, self.base_freeze_idx,
+                               True, False)
+        for e in range(pre_epochs):
+            print(f'[Pre-Training Epoch {e+1}/{pre_epochs}]')
+            loss_1, acc_1 = base_trainer.train_epoch()
+            base_trainer.cur_layer_weight.append(None)
+        if dry_run:
+            print(base_trainer.accuracy)
+            print(base_trainer.loss)
+            return
+
+        # Initailize target_model with all-layers pre-trained base model
+        base_weights = base_trainer.get_model().get_weights()
+        next_model = keras.models.clone_model(base_trainer.get_model())
+        next_model._name = "Next"
+        next_model.set_weights(base_weights)
+        next_trainer = Trainer(next_model, self.data, self.next_freeze_idx,
+                               True, False)
+
+        for e in range(pre_epochs):
+            next_trainer.accuracy.append(None)
+            next_trainer.loss.append(None)
+            next_trainer.loss_delta.append(None)
+            next_trainer.cur_layer_weight.append(None)
+        return primary_trainer, secondary_trainer
+
+    def moving_average(self, data):
+        W = MOVING_AVERAGE_WINDOW_SIZE
+        if len(data) < W:
+            return np.nan
+        return sum(filter(None, data[-W:])) / W
+
+    def is_coverged(self, trainer):
+        delta_ma = self.moving_average(trainer.loss_delta)
+        if not np.isnan(delta_ma) and delta_ma <= LOSS_COVERGED_THRESHOLD:
+            return True
+        else:
+            return False
 
     def plot_figure(self):
         myplot.plot(self.t1.accuracy, self.t2.accuracy,
@@ -279,7 +328,7 @@ class Trainer():
         current_layer_weights = self.model.get_weights()[
             FREEZE_OPTIONS[current_layer_idx]]
 
-        layer_sum = np.sum(current_layer_weights**
+        layer_sum = np.sum(current_layer_weights **
                            2) / current_layer_weights.size
         layer_sum2 = np.sum(current_layer_weights) / np.sum(
             current_layer_weights**2)
@@ -325,7 +374,8 @@ if __name__ == '__main__':
         client_1.train_process(transmission_overlap=args.transmission_overlap,
                                dry_run=args.dry_run,
                                transmission_time=args.transmission_time,
-                               epochs=args.epochs)
+                               epochs=args.epochs,
+                               switch_model=args.switch_model)
     end = time.time()
     print(f'Total training time: {datetime.timedelta(seconds= end-start)}')
 
