@@ -1,3 +1,4 @@
+from email.mime import base
 from numpy import gradient
 from data import CIFAR10
 from lenet import LeNet
@@ -12,14 +13,17 @@ import tensorflow as tf
 import tensorflow.keras as keras
 from tensorflow.keras import backend as k
 
+import myplot
 # RESULT_PATH = 'result.txt'
 
 BATCH_SIZE = 64
 EPOCHS = 5
 
 PRE_EPOCHS = 2
-LOSS_THRESHOLD = 0.1
 CONSECUTIVE_EPOCH_THRESHOLD = 3
+
+LOSS_THRESHOLD = 0.05
+MOVING_AVERAGE_WINDOW_SIZE = 3
 
 TENSOR_TRANSMISSION_TIME = 30
 FREEZE_OPTIONS = [0, 2, 4, 6, 7]
@@ -66,40 +70,19 @@ def opt_parser():
 
 class Client():
     def __init__(self) -> None:
+        self.data = CIFAR10(BATCH_SIZE)
         self.base_freeze_idx = 0
         self.next_freeze_idx = 1
-        self.consecutive_frozen_epochs = 0
-
-        self.base_accuracy = []
-        self.base_loss = []
-        self.target_accuracy = []
-        self.target_loss = []
         self.layer_dicisions = []
-        self.data = CIFAR10(BATCH_SIZE)
+        self.loss_diff = []
 
-        self.base_loss_delta = []
-        self.target_loss_delta = []
-        self.base_weights = []
-        self.target_weights = []
-        self.base_grads = []
-        self.target_grads = []
+        self.t1 = ''
+        self.t2 = ''
 
     def train_process(self, transmission_overlap, dry_run, transmission_time,
                       epochs):
         self.base_freeze_idx = 0
         self.next_freeze_idx = 1
-        self.consecutive_frozen_epochs = 0
-        self.base_accuracy.clear()
-        self.base_loss.clear()
-        self.target_accuracy.clear()
-        self.target_loss.clear()
-        self.layer_dicisions.clear()
-        self.base_loss_delta.clear()
-        self.target_loss_delta.clear()
-        self.base_weights.clear()
-        self.target_weights.clear()
-        self.base_grads.clear()
-        self.target_grads.clear()
 
         print(f'Overlap: {transmission_overlap}')
         print(f'Dry_run: {dry_run}')
@@ -113,28 +96,14 @@ class Client():
         base_model = LeNet(self.data.input_shape, self.data.num_classes,
                            "Base")
         base_trainer = Trainer(base_model, self.data, self.base_freeze_idx,
-                               True)
+                               True, False)
         for e in range(pre_epochs):
-            print(f'[Pre-Training Epoch {e}]')
+            print(f'[Pre-Training Epoch {e+1}/{pre_epochs}]')
             loss_1, acc_1 = base_trainer.train_epoch()
-
-            if e == 0:
-                self.base_loss_delta.append(None)
-            else:
-                b_delta_loss = loss_1 - self.base_loss[-1]
-            self.base_loss.append(loss_1)
-            self.base_accuracy.append(acc_1)
-            self.target_loss.append(None)
-            self.target_accuracy.append(None)
-            self.target_loss_delta.append(None)
-            self.base_weights.append(None)
-            self.target_weights.append(None)
-            # self.base_grads.append(base_trainer.gradients)
-            print(base_trainer.gradients)
-
+            base_trainer.cur_layer_weight.append(None)
         if dry_run:
-            print(self.base_accuracy)
-            print(self.base_loss)
+            print(base_trainer.accuracy)
+            print(base_trainer.loss)
             return
 
         # Initailize target_model with all-layers pre-trained base model
@@ -143,12 +112,22 @@ class Client():
         next_model._name = "Next"
         next_model.set_weights(base_weights)
         next_trainer = Trainer(next_model, self.data, self.next_freeze_idx,
-                               True)
+                               True, False)
+
+        for e in range(pre_epochs):
+            next_trainer.accuracy.append(None)
+            next_trainer.loss.append(None)
+            next_trainer.loss_delta.append(None)
+            next_trainer.cur_layer_weight.append(None)
 
         # In each training epochs
         for e in range(epochs):
-            print(f'[Epoch {e}] Base freeze layers: {self.base_freeze_idx}')
-            print(f'[Epoch {e}] Next freeze layers: {self.next_freeze_idx}')
+            print(
+                f'[Epoch {(e+1)}/{epochs}] Base freeze layers: {self.base_freeze_idx}'
+            )
+            print(
+                f'[Epoch {(e+1)}/{epochs}] Next freeze layers: {self.next_freeze_idx}'
+            )
 
             ## pass base_loss to central server?
             loss_1, acc_1 = base_trainer.train_epoch()
@@ -187,104 +166,88 @@ class Client():
                 t1.join()
                 print(f'Tensor transmission done !')
 
-            if self.base_loss[-1] != None:
-                b_delta_loss = loss_1 - self.base_loss[-1]
-            else:
-                t_delta_loss = None
-
-            if self.target_loss[-1] != None:
-                t_delta_loss = loss_2 - self.target_loss[-1]
-            else:
-                t_delta_loss = None
-
-            self.base_loss.append(loss_1)
-            self.base_accuracy.append(acc_1)
-            self.target_loss.append(loss_2)
-            self.target_accuracy.append(acc_2)
             self.layer_dicisions.append(self.base_freeze_idx)
-            self.base_loss_delta.append(b_delta_loss)
-            self.target_loss_delta.append(t_delta_loss)
+            base_trainer.save_layer_weights(self.base_freeze_idx)
+            next_trainer.save_layer_weights(self.base_freeze_idx)
 
-            self.save_layer_weights(base_trainer, next_trainer)
-            # self.save_gradients(base_trainer, next_trainer, loss_1, loss_2)
+            self.loss_diff.append(loss_2 - loss_1)
+            diff_ma = self.get_moving_average()
+            print(diff_ma)
 
             # Switch to new model
-            # if e >= 0 and abs(loss_2 - loss_1) <= LOSS_THRESHOLD:
-            if e >= 0 and loss_2 - loss_1 <= LOSS_THRESHOLD:
+            if not np.isinf(diff_ma) and diff_ma <= LOSS_THRESHOLD:
+                self.loss_diff.clear()
 
                 print(f'Loss Diff.:{loss_2-loss_1}, is lower than threshold')
-                self.consecutive_frozen_epochs += 1
+                print(
+                    f'Loss Diff.:{loss_2-loss_1}, threshold satisfied and use new model'
+                )
 
-                if self.consecutive_frozen_epochs >= 3:
-                    print(
-                        f'Loss Diff.:{loss_2-loss_1}, threshold satisfied and use new model'
-                    )
-                    self.consecutive_frozen_epochs = 0
+                if self.next_freeze_idx >= len(
+                        FREEZE_OPTIONS) - 1 or self.base_freeze_idx >= len(
+                            FREEZE_OPTIONS) - 1:
+                    continue
 
-                    if self.next_freeze_idx >= len(
-                            FREEZE_OPTIONS) - 1 or self.base_freeze_idx >= len(
-                                FREEZE_OPTIONS) - 1:
-                        continue
+                self.base_freeze_idx += 1
+                self.next_freeze_idx += 1
 
-                    self.base_freeze_idx += 1
-                    self.next_freeze_idx += 1
+                # New Base model == current "next model"
+                next_trainer.get_model()._name = "Base"
+                base_trainer = Trainer(
+                    model=next_trainer.get_model(),
+                    data=self.data,
+                    freeze_layers=FREEZE_OPTIONS[self.base_freeze_idx],
+                    recompile=True,
+                    old_obj=base_trainer)
 
-                    next_trainer.get_model()._name = "Base"
-                    base_trainer = Trainer(
-                        model=next_trainer.get_model(),
-                        data=self.data,
-                        freeze_layers=FREEZE_OPTIONS[self.base_freeze_idx],
-                        recompile=True)
+                # Setup New "Next model"
+                base_weights = next_trainer.get_model().get_weights()
+                new_next_model = keras.models.clone_model(
+                    next_trainer.get_model())
+                new_next_model.set_weights(base_weights)
+                new_next_model._name = "Next"
+                next_trainer = Trainer(
+                    model=new_next_model,
+                    data=self.data,
+                    freeze_layers=FREEZE_OPTIONS[self.next_freeze_idx],
+                    recompile=True,
+                    old_obj=next_trainer)
 
-                    # [TODO] the weight is not preserved!!!
-                    base_weights = next_trainer.get_model().get_weights()
-                    new_next_model = keras.models.clone_model(
-                        next_trainer.get_model())
-                    new_next_model.set_weights(base_weights)
-                    new_next_model._name = "Next"
-                    next_trainer = Trainer(
-                        model=new_next_model,
-                        data=self.data,
-                        freeze_layers=FREEZE_OPTIONS[self.next_freeze_idx],
-                        recompile=True)
-                    # base_trainer.get_model().summary()
-                    # next_trainer.get_model().summary()
-
-        print(self.base_accuracy)
-        print(self.target_accuracy)
-        print(self.base_loss)
-        print(self.target_loss)
         print(self.layer_dicisions)
 
-        print(self.base_loss_delta)
-        print(self.target_loss_delta)
-        print(self.base_weights)
-        print(self.target_weights)
-        print(self.base_grads)
-        print(self.target_grads)
+        print(base_trainer.accuracy)
+        print(base_trainer.loss)
+        print(next_trainer.accuracy)
+        print(next_trainer.loss)
 
-    def save_layer_weights(self, base_trainer, next_trainer):
-        base_layer_weights = base_trainer.get_model().get_weights()[
-            FREEZE_OPTIONS[self.base_freeze_idx]]
-        next_layer_weights = next_trainer.get_model().get_weights()[
-            FREEZE_OPTIONS[self.base_freeze_idx]]
+        self.t1 = base_trainer
+        self.t2 = next_trainer
 
-        b_layer_sum = np.sum(base_layer_weights**2)
-        t_layer_sum = np.sum(next_layer_weights**2)
-        self.base_weights.append(b_layer_sum)
-        self.target_weights.append(t_layer_sum)
+    def get_moving_average(self):
+        W = MOVING_AVERAGE_WINDOW_SIZE
+        if len(self.loss_diff) < W:
+            return np.inf
+
+        return sum(self.loss_diff[-W:]) / W
+
+    def plot_figure(self):
+        myplot.plot(self.t1.accuracy, self.t2.accuracy,
+                    f"Gradually Freezing Accuracy", 1)
+        myplot.plot(self.t1.loss, self.t2.loss, f"Gradually Freezing Loss", 2)
+        myplot.show()
 
 
 class Trainer():
-    def __init__(self, model, data, freeze_layers, recompile) -> None:
+    def __init__(self, model, data, freeze_layers, recompile, old_obj) -> None:
         self.model = model
         self.data = data
         self.freeze_layers = freeze_layers
         self.recompile = recompile
 
-        self.loss_history = []
-        self.accuracy_history = []
-        self.gradients = []
+        self.loss = []
+        self.loss_delta = []
+        self.accuracy = []
+        self.cur_layer_weight = []
 
         if self.recompile:
             for l in range(self.freeze_layers):
@@ -293,21 +256,45 @@ class Trainer():
                                optimizer='SGD',
                                metrics=['accuracy'])
             # self.model.summary()
+        if old_obj:
+            self.loss = old_obj.loss
+            self.loss_delta = old_obj.loss_delta
+            self.accuracy = old_obj.accuracy
+            self.cur_layer_weight = old_obj.cur_layer_weight
 
     def train_epoch(self):
         # train each batch
         for x, y in zip(self.data.x_train_batch, self.data.y_train_batch):
             self.model.train_on_batch(x, y)
 
-        score = self.model.evaluate(self.data.x_test,
-                                    self.data.y_test,
-                                    batch_size=BATCH_SIZE)
+        loss, accuracy = self.model.evaluate(self.data.x_test,
+                                             self.data.y_test,
+                                             batch_size=BATCH_SIZE)
+        self.save_loss_delta(loss)
+        self.loss.append(loss)
+        self.accuracy.append(accuracy)
+        return loss, accuracy
 
-        # model.get
-        self.loss_history.append(score[0])
-        self.accuracy_history.append(score[1])
+    def save_layer_weights(self, current_layer_idx):
+        current_layer_weights = self.model.get_weights()[
+            FREEZE_OPTIONS[current_layer_idx]]
 
-        return score[0], score[1]
+        layer_sum = np.sum(current_layer_weights**
+                           2) / current_layer_weights.size
+        layer_sum2 = np.sum(current_layer_weights) / np.sum(
+            current_layer_weights**2)
+        self.cur_layer_weight.append(layer_sum2)
+
+    def save_loss_delta(self, cur_loss):
+        if not self.loss:
+            self.loss_delta.append(None)
+            return
+
+        if self.loss[-1] != None:
+            loss_delta = cur_loss - self.loss[-1]
+        else:
+            loss_delta = None
+        self.loss_delta.append(loss_delta)
 
     def get_model(self):
         return self.model
@@ -339,6 +326,7 @@ if __name__ == '__main__':
                                dry_run=args.dry_run,
                                transmission_time=args.transmission_time,
                                epochs=args.epochs)
-
     end = time.time()
     print(f'Total training time: {datetime.timedelta(seconds= end-start)}')
+
+    client_1.plot_figure()

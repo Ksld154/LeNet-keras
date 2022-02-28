@@ -1,5 +1,8 @@
-from keras import models, layers
-import keras
+import tensorflow.keras as keras
+from tensorflow.keras import models, layers, optimizers
+
+# from keras import models, layers, optimizers
+# import keras
 
 
 class LeNet(models.Sequential):
@@ -40,6 +43,10 @@ class LeNet(models.Sequential):
         self.add(layers.Dense(84, activation='ReLU'))
         self.add(layers.Dense(nb_classes, activation='softmax'))
 
+        sgd = optimizers.SGD(learning_rate=0.1,
+                             momentum=0.0,
+                             decay=1,
+                             nesterov=False)
         self.compile(loss=keras.losses.categorical_crossentropy,
-                     optimizer='SGD',
+                     optimizer=sgd,
                      metrics=['accuracy'])
