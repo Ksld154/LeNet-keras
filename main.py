@@ -1,9 +1,10 @@
-from email.mime import base
-from numpy import gradient
+# from email.mime import base
+# from numpy import gradient
+from gc import callbacks
 from data import CIFAR10
 from lenet import LeNet
 from transmitter import Transmitter
-import logging
+# import logging
 import os
 import datetime
 import time
@@ -13,9 +14,10 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import tensorflow as tf
 import tensorflow.keras as keras
-from tensorflow.keras import backend as k
+from tensorflow.keras import backend as K
 
 import myplot
+
 # RESULT_PATH = 'result.txt'
 
 BATCH_SIZE = 64
@@ -23,11 +25,14 @@ PRE_EPOCHS = 2
 
 TENSOR_TRANSMISSION_TIME = 30
 FREEZE_OPTIONS = [0, 2, 4, 6, 7]
+os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 
 
 MOVING_AVERAGE_WINDOW_SIZE = 7
 LOSS_COVERGED_THRESHOLD = 0.01
-LOSS_DIFF_THRESHOLD = 0.01
+LOSS_DIFF_THRESHOLD = 0.05
+
+INITIAL_FREEZE_LAYERS = 3
 
 
 def opt_parser():
@@ -66,7 +71,7 @@ def opt_parser():
                         type=int,
                         help='Training epoches (default: %(default))')
     parser.add_argument('-s',
-                        '--switch_model',
+                        '--switch',
                         default=True,
                         dest='switch_model',
                         help='Enable model switching (default: %(default)s)',
@@ -83,53 +88,30 @@ class Client():
         self.layer_dicisions = []
         self.loss_diff = []
 
+        self.epochs = 10
+        self.pre_epochs = PRE_EPOCHS
+
         self.t1 = ''
         self.t2 = ''
 
     def train_process(self, transmission_overlap, dry_run, transmission_time,
                       epochs, switch_model):
-        self.base_freeze_idx = 0
-        self.next_freeze_idx = 1
-        both_converged = False
 
         print(f'Overlap: {transmission_overlap}')
         print(f'Dry_run: {dry_run}')
         print(f'Total epochs: {epochs}')
+        print(f'Switch model: {switch_model}')
 
-        pre_epochs = PRE_EPOCHS
-        if dry_run:
-            pre_epochs = 12
+        self.epochs = epochs
+        self.base_freeze_idx = 0
+        self.next_freeze_idx = INITIAL_FREEZE_LAYERS
+        both_converged = False
 
-        # do some pre-training before freezing
-        base_model = LeNet(self.data.input_shape, self.data.num_classes,
-                           "Base")
-        base_trainer = Trainer(base_model, self.data, self.base_freeze_idx,
-                               True, False)
-        for e in range(pre_epochs):
-            print(f'[Pre-Training Epoch {e+1}/{pre_epochs}]')
-            loss_1, acc_1 = base_trainer.train_epoch()
-            base_trainer.cur_layer_weight.append(None)
-        if dry_run:
-            print(base_trainer.accuracy)
-            print(base_trainer.loss)
-            return
-
-        # Initailize target_model with all-layers pre-trained base model
-        base_weights = base_trainer.get_model().get_weights()
-        next_model = keras.models.clone_model(base_trainer.get_model())
-        next_model._name = "Next"
-        next_model.set_weights(base_weights)
-        next_trainer = Trainer(next_model, self.data, self.next_freeze_idx,
-                               True, False)
-
-        for e in range(pre_epochs):
-            next_trainer.accuracy.append(None)
-            next_trainer.loss.append(None)
-            next_trainer.loss_delta.append(None)
-            next_trainer.cur_layer_weight.append(None)
+        primary_trainer, secondary_trainer = self.setup_and_pretrain(
+            dry_run, switch_model)
 
         # In each training epochs
-        for e in range(epochs):
+        for e in range(self.epochs):
             print(
                 f'[Epoch {(e+1)}/{epochs}] Base freeze layers: {self.base_freeze_idx}'
             )
@@ -138,7 +120,7 @@ class Client():
             )
 
             # pass base_loss to central server?
-            loss_1, acc_1 = base_trainer.train_epoch()
+            loss_1, _ = primary_trainer.train_epoch()
 
             if transmission_overlap:
                 print(f'[BG] Starting Transmitting tensors...')
@@ -148,7 +130,7 @@ class Client():
                 # train target_model on background thread
                 future = ''
                 with ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(next_trainer.train_epoch)
+                    future = executor.submit(secondary_trainer.train_epoch)
 
                 # Receive model update from central around here?
                 t1.join()
@@ -157,15 +139,15 @@ class Client():
                 # check if t2 is finish
                 if future.done():
                     print(future.result())
-                    loss_2, acc_2 = future.result()
+                    loss_2, _ = future.result()
                 else:
-                    # next_trainer is not ready, so we will not wait for it and discard it's result
+                    # secondary_trainer is not ready, so we will not wait for it and discard it's result
                     continue
 
-            # tranmission is done after next_trainer is trained
+            # tranmission is done after secondary_trainer is trained
             else:
                 # train target model first
-                loss_2, acc_2 = next_trainer.train_epoch()
+                loss_2, _ = secondary_trainer.train_epoch()
 
                 # simulate transmission only after target model training is finished
                 print(f'[FG] Starting Transmitting tensors...')
@@ -174,97 +156,103 @@ class Client():
                 t1.join()
                 print(f'Tensor transmission done !')
 
-            self.layer_dicisions.append(self.base_freeze_idx)
-            base_trainer.save_layer_weights(self.base_freeze_idx)
-            next_trainer.save_layer_weights(self.base_freeze_idx)
+            # primary_trainer.save_layer_weights(self.base_freeze_idx)
+            # secondary_trainer.save_layer_weights(self.base_freeze_idx)
 
+            self.layer_dicisions.append(self.base_freeze_idx)
             self.loss_diff.append(loss_2 - loss_1)
             diff_ma = self.moving_average(self.loss_diff)
             print(diff_ma)
 
-            if self.is_coverged(base_trainer) and self.is_coverged(next_trainer):
+            if self.is_coverged(primary_trainer) and self.is_coverged(secondary_trainer):
                 print('*** Both model are converged! ***')
                 both_converged = True
 
             # Switch to new model
-            if switch_model and both_converged and not np.isnan(diff_ma) and diff_ma <= LOSS_DIFF_THRESHOLD:
+            if switch_model and both_converged and not np.isnan(diff_ma) and diff_ma >= LOSS_DIFF_THRESHOLD:
                 self.loss_diff.clear()
 
-                print(f'Loss Diff.:{loss_2-loss_1}, is lower than threshold')
                 print(
-                    f'Loss Diff.:{loss_2-loss_1}, threshold satisfied and use new model')
+                    f'Loss Diff.:{loss_2-loss_1}, is bigger than threshold, which means model#2 is bad')
+                print(
+                    f'Loss Diff.: {loss_2-loss_1}, we will copy model\# 1 to model#2')
 
                 if self.next_freeze_idx >= len(FREEZE_OPTIONS) - 1 or self.base_freeze_idx >= len(FREEZE_OPTIONS) - 1:
                     continue
 
-                self.base_freeze_idx += 1
-                self.next_freeze_idx += 1
+                self.next_freeze_idx  = self.base_freeze_idx
 
-                # New Base model == current "next model"
-                next_trainer.get_model()._name = "Base"
-                base_trainer = Trainer(
-                    model=next_trainer.get_model(),
-                    data=self.data,
-                    freeze_layers=FREEZE_OPTIONS[self.base_freeze_idx],
-                    recompile=True,
-                    old_obj=base_trainer)
-
-                # Setup New "Next model"
-                base_weights = next_trainer.get_model().get_weights()
-                new_next_model = keras.models.clone_model(
-                    next_trainer.get_model())
-                new_next_model.set_weights(base_weights)
-                new_next_model._name = "Next"
-                next_trainer = Trainer(
-                    model=new_next_model,
+                # Assign New "Secondary model" to current primary model
+                primary_weights = primary_trainer.get_model().get_weights()
+                new_secondary_model = keras.models.clone_model(primary_trainer.get_model())
+                new_secondary_model.set_weights(primary_weights)
+                new_secondary_model._name = "Secondary"
+                secondary_trainer = Trainer(
+                    model=new_secondary_model,
                     data=self.data,
                     freeze_layers=FREEZE_OPTIONS[self.next_freeze_idx],
                     recompile=True,
-                    old_obj=next_trainer)
+                    old_obj=secondary_trainer)
+
+                # New primary model model == current "primary model" + 1 more frozen layer
+                self.base_freeze_idx += 1
+                primary_trainer.get_model()._name = "Primary"
+                primary_trainer = Trainer(
+                    model=primary_trainer.get_model(),
+                    data=self.data,
+                    freeze_layers=FREEZE_OPTIONS[self.base_freeze_idx],
+                    recompile=True,
+                    old_obj=primary_trainer)
+
 
         print(self.layer_dicisions)
 
-        print(base_trainer.accuracy)
-        print(base_trainer.loss)
-        print(next_trainer.accuracy)
-        print(next_trainer.loss)
+        print(primary_trainer.accuracy)
+        print(primary_trainer.loss)
+        print(secondary_trainer.accuracy)
+        print(secondary_trainer.loss)
 
-        self.t1 = base_trainer
-        self.t2 = next_trainer
+        self.t1 = primary_trainer
+        self.t2 = secondary_trainer
 
-    def setup_and_pretrain(self, dry_run):
-        pre_epochs = PRE_EPOCHS
+    def setup_and_pretrain(self, dry_run, switch_model):
         if dry_run:
-            pre_epochs = 12
+            self.pre_epochs = self.epochs
 
         # do some pre-training before freezing
-        base_model = LeNet(self.data.input_shape, self.data.num_classes,
-                           "Base")
-        base_trainer = Trainer(base_model, self.data, self.base_freeze_idx,
-                               True, False)
-        for e in range(pre_epochs):
-            print(f'[Pre-Training Epoch {e+1}/{pre_epochs}]')
-            loss_1, acc_1 = base_trainer.train_epoch()
-            base_trainer.cur_layer_weight.append(None)
+        primary_model = LeNet(self.data.input_shape, self.data.num_classes,
+                              "Primary")
+        primary_trainer = Trainer(primary_model, self.data, FREEZE_OPTIONS[self.base_freeze_idx],
+                                  True, False)
+        for e in range(self.pre_epochs):
+            print(f'[Pre-Training Epoch {e+1}/{self.pre_epochs}]')
+            primary_trainer.train_epoch()
+            primary_trainer.cur_layer_weight.append(None)
         if dry_run:
-            print(base_trainer.accuracy)
-            print(base_trainer.loss)
+            print(primary_trainer.accuracy)
+            print(primary_trainer.loss)
             return
 
         # Initailize target_model with all-layers pre-trained base model
-        base_weights = base_trainer.get_model().get_weights()
-        next_model = keras.models.clone_model(base_trainer.get_model())
-        next_model._name = "Next"
-        next_model.set_weights(base_weights)
-        next_trainer = Trainer(next_model, self.data, self.next_freeze_idx,
-                               True, False)
+        primary_model_weights = primary_trainer.get_model().get_weights()
+        secondary_model = keras.models.clone_model(primary_trainer.get_model())
+        secondary_model._name = "Secondary"
+        secondary_model.set_weights(primary_model_weights)
+        secondary_trainer = Trainer(secondary_model, self.data, FREEZE_OPTIONS[self.next_freeze_idx],
+                                    True, False)
 
-        for e in range(pre_epochs):
-            next_trainer.accuracy.append(None)
-            next_trainer.loss.append(None)
-            next_trainer.loss_delta.append(None)
-            next_trainer.cur_layer_weight.append(None)
+        for e in range(self.pre_epochs):
+            secondary_trainer.accuracy.append(None)
+            secondary_trainer.loss.append(None)
+            secondary_trainer.loss_delta.append(None)
+            secondary_trainer.cur_layer_weight.append(None)
+
+        # if not switch_model:
+        #     return primary_trainer, secondary_trainer
+        # else:
+        #     return secondary_trainer, primary_trainer
         return primary_trainer, secondary_trainer
+
 
     def moving_average(self, data):
         W = MOVING_AVERAGE_WINDOW_SIZE
@@ -273,16 +261,18 @@ class Client():
         return sum(filter(None, data[-W:])) / W
 
     def is_coverged(self, trainer):
-        delta_ma = self.moving_average(trainer.loss_delta)
+        # print(trainer.loss_delta[self.pre_epochs+1:])
+        delta_ma = self.moving_average(trainer.loss_delta[self.pre_epochs:])
         if not np.isnan(delta_ma) and delta_ma <= LOSS_COVERGED_THRESHOLD:
             return True
         else:
             return False
 
     def plot_figure(self):
-        myplot.plot(self.t1.accuracy, self.t2.accuracy,
+        myplot.plot(self.t1.accuracy, self.t2.accuracy, "Accuracy",
                     f"Gradually Freezing Accuracy", 1)
-        myplot.plot(self.t1.loss, self.t2.loss, f"Gradually Freezing Loss", 2)
+        myplot.plot(self.t1.loss, self.t2.loss, "Loss",
+                    f"Gradually Freezing Loss", 2)
         myplot.show()
 
 
@@ -301,8 +291,13 @@ class Trainer():
         if self.recompile:
             for l in range(self.freeze_layers):
                 self.model.layers[l].trainable = False
+
+            sgd = keras.optimizers.SGD(learning_rate=0.01,
+                                       momentum=0.0,
+                                       decay=1e-4,
+                                       nesterov=False)
             self.model.compile(loss=tf.keras.losses.categorical_crossentropy,
-                               optimizer='SGD',
+                               optimizer=sgd,
                                metrics=['accuracy'])
             # self.model.summary()
         if old_obj:
@@ -318,7 +313,12 @@ class Trainer():
 
         loss, accuracy = self.model.evaluate(self.data.x_test,
                                              self.data.y_test,
-                                             batch_size=BATCH_SIZE)
+                                             batch_size=BATCH_SIZE,
+                                             )
+        lr = K.get_value(self.model.optimizer._decayed_lr(tf.float32))
+        # print(f"Learning rate: {lr:.6f}")
+        print(f"Learning rate: {lr}")
+
         self.save_loss_delta(loss)
         self.loss.append(loss)
         self.accuracy.append(accuracy)
@@ -353,29 +353,29 @@ if __name__ == '__main__':
     os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
     args = opt_parser()
 
-    print(f'*** Start Training! ***')
+    print('*** Start Training! ***')
     start = time.time()
     client_1 = Client()
 
-    if args.all_experiments:
-        client_1.train_process(transmission_overlap=True,
-                               dry_run=True,
-                               transmission_time=args.transmission_time,
-                               epochs=args.epochs)  # dry run (baseline)
-        client_1.train_process(transmission_overlap=True,
-                               dry_run=False,
-                               transmission_time=args.transmission_time,
-                               epochs=args.epochs)  # Overlap
-        client_1.train_process(transmission_overlap=False,
-                               dry_run=False,
-                               transmission_time=args.transmission_time,
-                               epochs=args.epochs)  # Non-Overlap
-    else:
-        client_1.train_process(transmission_overlap=args.transmission_overlap,
-                               dry_run=args.dry_run,
-                               transmission_time=args.transmission_time,
-                               epochs=args.epochs,
-                               switch_model=args.switch_model)
+    # if args.all_experiments:
+    #     client_1.train_process(transmission_overlap=True,
+    #                            dry_run=True,
+    #                            transmission_time=args.transmission_time,
+    #                            epochs=args.epochs)  # dry run (baseline)
+    #     client_1.train_process(transmission_overlap=True,
+    #                            dry_run=False,
+    #                            transmission_time=args.transmission_time,
+    #                            epochs=args.epochs)  # Overlap
+    #     client_1.train_process(transmission_overlap=False,
+    #                            dry_run=False,
+    #                            transmission_time=args.transmission_time,
+    #                            epochs=args.epochs)  # Non-Overlap
+    # else:
+    client_1.train_process(transmission_overlap=args.transmission_overlap,
+                           dry_run=args.dry_run,
+                           transmission_time=args.transmission_time,
+                           epochs=args.epochs,
+                           switch_model=args.switch_model)
     end = time.time()
     print(f'Total training time: {datetime.timedelta(seconds= end-start)}')
 

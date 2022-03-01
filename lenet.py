@@ -1,5 +1,7 @@
+from gc import callbacks
 import tensorflow.keras as keras
 from tensorflow.keras import models, layers, optimizers
+from tensorflow.keras import backend as K
 
 # from keras import models, layers, optimizers
 # import keras
@@ -43,10 +45,24 @@ class LeNet(models.Sequential):
         self.add(layers.Dense(84, activation='ReLU'))
         self.add(layers.Dense(nb_classes, activation='softmax'))
 
-        sgd = optimizers.SGD(learning_rate=0.1,
+        sgd = optimizers.SGD(learning_rate=0.01,
                              momentum=0.0,
-                             decay=1,
+                             decay=1e-4,
                              nesterov=False)
+
         self.compile(loss=keras.losses.categorical_crossentropy,
                      optimizer=sgd,
                      metrics=['accuracy'])
+
+
+# class LearningRateTracker(keras.callbacks.Callback):
+#     def on_epoch_end(self, epoch, logs=None):
+#         current_decayed_lr = self.model.optimizer._decayed_lr(
+#             keras.float32).numpy()
+#         print("current decayed lr: {:0.7f}".format(current_decayed_lr))
+
+
+# class LearningRateTracker():
+#     def on_epoch_end(self):
+#         lr = float(K.get_value(self.model.optimizer._decayed_lr))
+#         print("Learning rate:", lr)
