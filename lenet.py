@@ -55,14 +55,3 @@ class LeNet(models.Sequential):
                      metrics=['accuracy'])
 
 
-# class LearningRateTracker(keras.callbacks.Callback):
-#     def on_epoch_end(self, epoch, logs=None):
-#         current_decayed_lr = self.model.optimizer._decayed_lr(
-#             keras.float32).numpy()
-#         print("current decayed lr: {:0.7f}".format(current_decayed_lr))
-
-
-# class LearningRateTracker():
-#     def on_epoch_end(self):
-#         lr = float(K.get_value(self.model.optimizer._decayed_lr))
-#         print("Learning rate:", lr)

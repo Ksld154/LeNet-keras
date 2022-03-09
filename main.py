@@ -1,10 +1,11 @@
-# from email.mime import base
-# from numpy import gradient
-from gc import callbacks
 from data import CIFAR10
 from lenet import LeNet
 from transmitter import Transmitter
-# import logging
+from trainer import Trainer
+import utils
+import myplot
+from constants import *
+
 import os
 import datetime
 import time
@@ -12,27 +13,20 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
-import tensorflow as tf
 import tensorflow.keras as keras
-from tensorflow.keras import backend as K
+# import tensorflow as tf
+# from tensorflow.keras import backend as K
 
-import myplot
-
-# RESULT_PATH = 'result.txt'
-
-BATCH_SIZE = 64
-PRE_EPOCHS = 2
-
-TENSOR_TRANSMISSION_TIME = 30
-FREEZE_OPTIONS = [0, 2, 4, 6, 7]
 os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 
+# BATCH_SIZE = 64
+# PRE_EPOCHS = 2
+# TENSOR_TRANSMISSION_TIME = 30
+# FREEZE_OPTIONS = [0, 2, 4, 6, 7]
+# MOVING_AVERAGE_WINDOW_SIZE = 7
 
-MOVING_AVERAGE_WINDOW_SIZE = 7
-LOSS_COVERGED_THRESHOLD = 0.01
-LOSS_DIFF_THRESHOLD = 0.05
-
-INITIAL_FREEZE_LAYERS = 3
+# LOSS_DIFF_THRESHOLD = 0.05
+# INITIAL_FREEZE_LAYERS = 3
 
 
 def opt_parser():
@@ -76,6 +70,12 @@ def opt_parser():
                         dest='switch_model',
                         help='Enable model switching (default: %(default)s)',
                         action=argparse.BooleanOptionalAction)
+    parser.add_argument('-u',
+                        '--utility',
+                        default=False,
+                        dest='utility_flag',
+                        help='Use model utility to decide switch model or not (default: %(default)s)',
+                        action=argparse.BooleanOptionalAction)
 
     return parser.parse_args()
 
@@ -95,12 +95,14 @@ class Client():
         self.t2 = ''
 
     def train_process(self, transmission_overlap, dry_run, transmission_time,
-                      epochs, switch_model):
+                      epochs, switch_model_flag, utility_flag):
 
         print(f'Overlap: {transmission_overlap}')
         print(f'Dry_run: {dry_run}')
         print(f'Total epochs: {epochs}')
-        print(f'Switch model: {switch_model}')
+        print(f'Switch model: {switch_model_flag}')
+        print(f'Utility: {utility_flag}')
+
 
         self.epochs = epochs
         self.base_freeze_idx = 0
@@ -108,16 +110,12 @@ class Client():
         both_converged = False
 
         primary_trainer, secondary_trainer = self.setup_and_pretrain(
-            dry_run, switch_model)
+            dry_run, switch_model_flag)
 
         # In each training epochs
         for e in range(self.epochs):
-            print(
-                f'[Epoch {(e+1)}/{epochs}] Base freeze layers: {self.base_freeze_idx}'
-            )
-            print(
-                f'[Epoch {(e+1)}/{epochs}] Next freeze layers: {self.next_freeze_idx}'
-            )
+            print(f'[Epoch {(e+1)}/{epochs}] Base freeze layers: {self.base_freeze_idx}')
+            print(f'[Epoch {(e+1)}/{epochs}] Next freeze layers: {self.next_freeze_idx}')
 
             # pass base_loss to central server?
             loss_1, _ = primary_trainer.train_epoch()
@@ -155,58 +153,55 @@ class Client():
                 t1.start()
                 t1.join()
                 print(f'Tensor transmission done !')
-
-            # primary_trainer.save_layer_weights(self.base_freeze_idx)
-            # secondary_trainer.save_layer_weights(self.base_freeze_idx)
-
+            
             self.layer_dicisions.append(self.base_freeze_idx)
             self.loss_diff.append(loss_2 - loss_1)
-            diff_ma = self.moving_average(self.loss_diff)
-            print(diff_ma)
+            diff_ma = utils.moving_average(self.loss_diff, MOVING_AVERAGE_WINDOW_SIZE)
+            print(f'Loss Difference: {diff_ma}')
 
-            if self.is_coverged(primary_trainer) and self.is_coverged(secondary_trainer):
+            # primary_frozen_params, primary_frozen_ratio = primary_trainer.get_frozen_ratio()
+            # secondary_frozen_params, secondary_frozen_ratio = secondary_trainer.get_frozen_ratio()
+            primary_utility = primary_trainer.get_model_utility(self.base_freeze_idx+1)
+            secondary_utility = secondary_trainer.get_model_utility(self.next_freeze_idx+1)
+            primary_trainer.utility.append(primary_utility)
+            secondary_trainer.utility.append(secondary_utility)
+            print(f'Primary Utility: {primary_utility}')
+            print(f'Secondary Utility: {secondary_utility}')
+            
+            secondary_utility_avg = utils.moving_average(primary_trainer.utility, MOVING_AVERAGE_WINDOW_SIZE)
+            secondary_utility_avg = utils.moving_average(secondary_utility, MOVING_AVERAGE_WINDOW_SIZE)
+
+
+            if primary_trainer.is_coverged(self.pre_epochs) and secondary_trainer.is_coverged(self.pre_epochs):
                 print('*** Both model are converged! ***')
                 both_converged = True
-
+            
             # Switch to new model
-            if switch_model and both_converged and not np.isnan(diff_ma) and diff_ma >= LOSS_DIFF_THRESHOLD:
-                self.loss_diff.clear()
-
-                print(
-                    f'Loss Diff.:{loss_2-loss_1}, is bigger than threshold, which means model#2 is bad')
-                print(
-                    f'Loss Diff.: {loss_2-loss_1}, we will copy model\# 1 to model#2')
-
+            if switch_model_flag and both_converged :
+                # boundary check
                 if self.next_freeze_idx >= len(FREEZE_OPTIONS) - 1 or self.base_freeze_idx >= len(FREEZE_OPTIONS) - 1:
                     continue
+                
+                # Use utility function to decide switch model or not
+                if utility_flag and secondary_utility_avg < secondary_utility_avg:
+                    print(f'Secondary model has better avg. utility: {secondary_utility_avg}')
+                    print('copy model#2 to model#1')
 
-                self.next_freeze_idx  = self.base_freeze_idx
+                    self.base_freeze_idx  = self.next_freeze_idx
+                    primary_trainer, secondary_trainer = self.switch_model_reverse(secondary_trainer, primary_trainer)
 
-                # Assign New "Secondary model" to current primary model
-                primary_weights = primary_trainer.get_model().get_weights()
-                new_secondary_model = keras.models.clone_model(primary_trainer.get_model())
-                new_secondary_model.set_weights(primary_weights)
-                new_secondary_model._name = "Secondary"
-                secondary_trainer = Trainer(
-                    model=new_secondary_model,
-                    data=self.data,
-                    freeze_layers=FREEZE_OPTIONS[self.next_freeze_idx],
-                    recompile=True,
-                    old_obj=secondary_trainer)
+                if not utility_flag and not np.isnan(diff_ma) and diff_ma >= LOSS_DIFF_THRESHOLD:
+                    print(f'Loss Diff.: {loss_2-loss_1}, is bigger than threshold, which means model#2 is bad')
+                    print(f'Loss Diff.: {loss_2-loss_1}, we will copy model#1 to model#2')
 
-                # New primary model model == current "primary model" + 1 more frozen layer
-                self.base_freeze_idx += 1
-                primary_trainer.get_model()._name = "Primary"
-                primary_trainer = Trainer(
-                    model=primary_trainer.get_model(),
-                    data=self.data,
-                    freeze_layers=FREEZE_OPTIONS[self.base_freeze_idx],
-                    recompile=True,
-                    old_obj=primary_trainer)
+                    self.loss_diff.clear()
+                    if self.next_freeze_idx >= len(FREEZE_OPTIONS) - 1 or self.base_freeze_idx >= len(FREEZE_OPTIONS) - 1:
+                        continue
 
+                    self.next_freeze_idx  = self.base_freeze_idx
+                    primary_trainer, secondary_trainer = self.switch_model(primary_trainer, secondary_trainer)
 
         print(self.layer_dicisions)
-
         print(primary_trainer.accuracy)
         print(primary_trainer.loss)
         print(secondary_trainer.accuracy)
@@ -215,7 +210,7 @@ class Client():
         self.t1 = primary_trainer
         self.t2 = secondary_trainer
 
-    def setup_and_pretrain(self, dry_run, switch_model):
+    def setup_and_pretrain(self, dry_run, switch_model_flag):
         if dry_run:
             self.pre_epochs = self.epochs
 
@@ -246,27 +241,62 @@ class Client():
             secondary_trainer.loss.append(None)
             secondary_trainer.loss_delta.append(None)
             secondary_trainer.cur_layer_weight.append(None)
-
-        # if not switch_model:
-        #     return primary_trainer, secondary_trainer
-        # else:
-        #     return secondary_trainer, primary_trainer
+        
         return primary_trainer, secondary_trainer
 
+    
 
-    def moving_average(self, data):
-        W = MOVING_AVERAGE_WINDOW_SIZE
-        if len(data) < W:
-            return np.nan
-        return sum(filter(None, data[-W:])) / W
+    def switch_model(self, primary_trainer, secondary_trainer):
+        # Assign New "Secondary model" to current primary model
+        primary_weights = primary_trainer.get_model().get_weights()
+        new_secondary_model = keras.models.clone_model(primary_trainer.get_model())
+        new_secondary_model.set_weights(primary_weights)
+        new_secondary_model._name = "Secondary"
+        new_secondary_trainer = Trainer(
+            model=new_secondary_model,
+            data=self.data,
+            freeze_layers=FREEZE_OPTIONS[self.next_freeze_idx],
+            recompile=True,
+            old_obj=secondary_trainer)
 
-    def is_coverged(self, trainer):
-        # print(trainer.loss_delta[self.pre_epochs+1:])
-        delta_ma = self.moving_average(trainer.loss_delta[self.pre_epochs:])
-        if not np.isnan(delta_ma) and delta_ma <= LOSS_COVERGED_THRESHOLD:
-            return True
-        else:
-            return False
+        # New primary model == current "primary model" + 1 more frozen layer
+        self.base_freeze_idx += 1
+        primary_trainer.get_model()._name = "Primary"
+        new_primary_trainer = Trainer(
+            model=primary_trainer.get_model(),
+            data=self.data,
+            freeze_layers=FREEZE_OPTIONS[self.base_freeze_idx],
+            recompile=True,
+            old_obj=primary_trainer)
+        
+        return new_primary_trainer, new_secondary_trainer
+
+    
+    # copy src_trainer to dst_trainer, since src is better than dst
+    def switch_model_reverse(self, src_trainer, dst_trainer):
+        
+        # New "src model" = current dst_model
+        primary_weights = src_trainer.get_model().get_weights()
+        new_dst_model = keras.models.clone_model(src_trainer.get_model())
+        new_dst_model.set_weights(primary_weights)
+        new_dst_model._name = "Primary"
+        new_dst_trainer = Trainer(
+            model=new_dst_model,
+            data=self.data,
+            freeze_layers=FREEZE_OPTIONS[self.next_freeze_idx],
+            recompile=True,
+            old_obj=dst_trainer)
+
+        # New src_model == current "src_model"
+        src_trainer.get_model()._name = "Secondary"
+        new_src_trainer = Trainer(
+            model=src_trainer.get_model(),
+            data=self.data,
+            freeze_layers=FREEZE_OPTIONS[self.base_freeze_idx],
+            recompile=True,
+            old_obj=src_trainer)
+        
+        return new_dst_trainer, new_src_trainer
 
     def plot_figure(self):
         myplot.plot(self.t1.accuracy, self.t2.accuracy, "Accuracy",
@@ -275,78 +305,6 @@ class Client():
                     f"Gradually Freezing Loss", 2)
         myplot.show()
 
-
-class Trainer():
-    def __init__(self, model, data, freeze_layers, recompile, old_obj) -> None:
-        self.model = model
-        self.data = data
-        self.freeze_layers = freeze_layers
-        self.recompile = recompile
-
-        self.loss = []
-        self.loss_delta = []
-        self.accuracy = []
-        self.cur_layer_weight = []
-
-        if self.recompile:
-            for l in range(self.freeze_layers):
-                self.model.layers[l].trainable = False
-
-            sgd = keras.optimizers.SGD(learning_rate=0.01,
-                                       momentum=0.0,
-                                       decay=1e-4,
-                                       nesterov=False)
-            self.model.compile(loss=tf.keras.losses.categorical_crossentropy,
-                               optimizer=sgd,
-                               metrics=['accuracy'])
-            # self.model.summary()
-        if old_obj:
-            self.loss = old_obj.loss
-            self.loss_delta = old_obj.loss_delta
-            self.accuracy = old_obj.accuracy
-            self.cur_layer_weight = old_obj.cur_layer_weight
-
-    def train_epoch(self):
-        # train each batch
-        for x, y in zip(self.data.x_train_batch, self.data.y_train_batch):
-            self.model.train_on_batch(x, y)
-
-        loss, accuracy = self.model.evaluate(self.data.x_test,
-                                             self.data.y_test,
-                                             batch_size=BATCH_SIZE,
-                                             )
-        lr = K.get_value(self.model.optimizer._decayed_lr(tf.float32))
-        # print(f"Learning rate: {lr:.6f}")
-        print(f"Learning rate: {lr}")
-
-        self.save_loss_delta(loss)
-        self.loss.append(loss)
-        self.accuracy.append(accuracy)
-        return loss, accuracy
-
-    def save_layer_weights(self, current_layer_idx):
-        current_layer_weights = self.model.get_weights()[
-            FREEZE_OPTIONS[current_layer_idx]]
-
-        layer_sum = np.sum(current_layer_weights **
-                           2) / current_layer_weights.size
-        layer_sum2 = np.sum(current_layer_weights) / np.sum(
-            current_layer_weights**2)
-        self.cur_layer_weight.append(layer_sum2)
-
-    def save_loss_delta(self, cur_loss):
-        if not self.loss:
-            self.loss_delta.append(None)
-            return
-
-        if self.loss[-1] != None:
-            loss_delta = cur_loss - self.loss[-1]
-        else:
-            loss_delta = None
-        self.loss_delta.append(loss_delta)
-
-    def get_model(self):
-        return self.model
 
 
 if __name__ == '__main__':
@@ -357,25 +315,12 @@ if __name__ == '__main__':
     start = time.time()
     client_1 = Client()
 
-    # if args.all_experiments:
-    #     client_1.train_process(transmission_overlap=True,
-    #                            dry_run=True,
-    #                            transmission_time=args.transmission_time,
-    #                            epochs=args.epochs)  # dry run (baseline)
-    #     client_1.train_process(transmission_overlap=True,
-    #                            dry_run=False,
-    #                            transmission_time=args.transmission_time,
-    #                            epochs=args.epochs)  # Overlap
-    #     client_1.train_process(transmission_overlap=False,
-    #                            dry_run=False,
-    #                            transmission_time=args.transmission_time,
-    #                            epochs=args.epochs)  # Non-Overlap
-    # else:
     client_1.train_process(transmission_overlap=args.transmission_overlap,
                            dry_run=args.dry_run,
                            transmission_time=args.transmission_time,
                            epochs=args.epochs,
-                           switch_model=args.switch_model)
+                           switch_model_flag=args.switch_model,
+                           utility_flag=args.utility_flag)
     end = time.time()
     print(f'Total training time: {datetime.timedelta(seconds= end-start)}')
 
