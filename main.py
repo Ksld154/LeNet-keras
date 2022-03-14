@@ -14,10 +14,11 @@ from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import tensorflow.keras as keras
+import tabulate 
 # import tensorflow as tf
 # from tensorflow.keras import backend as K
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 
 # BATCH_SIZE = 64
 # PRE_EPOCHS = 2
@@ -72,10 +73,18 @@ def opt_parser():
                         action=argparse.BooleanOptionalAction)
     parser.add_argument('-u',
                         '--utility',
-                        default=False,
+                        default=True,
                         dest='utility_flag',
                         help='Use model utility to decide switch model or not (default: %(default)s)',
                         action=argparse.BooleanOptionalAction)
+
+    parser.add_argument('-g',
+                    '--gpu',
+                    default=3,
+                    dest='gpu_device',
+                    help='Specify which gpu device to use (default: %(default)s)',
+                    type=int)
+
 
     return parser.parse_args()
 
@@ -83,8 +92,6 @@ def opt_parser():
 class Client():
     def __init__(self) -> None:
         self.data = CIFAR10(BATCH_SIZE)
-        self.base_freeze_idx = 0
-        self.next_freeze_idx = 1
         self.layer_dicisions = []
         self.loss_diff = []
 
@@ -105,8 +112,6 @@ class Client():
 
 
         self.epochs = epochs
-        self.base_freeze_idx = 0
-        self.next_freeze_idx = INITIAL_FREEZE_LAYERS
         both_converged = False
 
         primary_trainer, secondary_trainer = self.setup_and_pretrain(
@@ -114,9 +119,9 @@ class Client():
 
         # In each training epochs
         for e in range(self.epochs):
-            print(f'[Epoch {(e+1)}/{epochs}] Base freeze layers: {self.base_freeze_idx}')
-            print(f'[Epoch {(e+1)}/{epochs}] Next freeze layers: {self.next_freeze_idx}')
-
+            print(f'[Epoch {(e+1)}/{epochs}] Base freeze layers: {primary_trainer.freeze_idx}')
+            print(f'[Epoch {(e+1)}/{epochs}] Next freeze layers: {secondary_trainer.freeze_idx}')
+            
             # pass base_loss to central server?
             loss_1, _ = primary_trainer.train_epoch()
 
@@ -154,22 +159,23 @@ class Client():
                 t1.join()
                 print(f'Tensor transmission done !')
             
-            self.layer_dicisions.append(self.base_freeze_idx)
+            self.layer_dicisions.append(primary_trainer.freeze_idx)
+
             self.loss_diff.append(loss_2 - loss_1)
             diff_ma = utils.moving_average(self.loss_diff, MOVING_AVERAGE_WINDOW_SIZE)
             print(f'Loss Difference: {diff_ma}')
 
-            # primary_frozen_params, primary_frozen_ratio = primary_trainer.get_frozen_ratio()
-            # secondary_frozen_params, secondary_frozen_ratio = secondary_trainer.get_frozen_ratio()
-            primary_utility = primary_trainer.get_model_utility(self.base_freeze_idx+1)
-            secondary_utility = secondary_trainer.get_model_utility(self.next_freeze_idx+1)
+            primary_frozen_params, primary_frozen_ratio = primary_trainer.get_frozen_ratio()
+            secondary_frozen_params, secondary_frozen_ratio = secondary_trainer.get_frozen_ratio()
+            primary_utility = primary_trainer.get_model_utility(primary_trainer.freeze_idx+1)
+            secondary_utility = secondary_trainer.get_model_utility(secondary_trainer.freeze_idx+1)
             primary_trainer.utility.append(primary_utility)
             secondary_trainer.utility.append(secondary_utility)
             print(f'Primary Utility: {primary_utility}')
             print(f'Secondary Utility: {secondary_utility}')
             
-            secondary_utility_avg = utils.moving_average(primary_trainer.utility, MOVING_AVERAGE_WINDOW_SIZE)
-            secondary_utility_avg = utils.moving_average(secondary_utility, MOVING_AVERAGE_WINDOW_SIZE)
+            primary_utility_avg = utils.moving_average(primary_trainer.utility, MOVING_AVERAGE_WINDOW_SIZE)
+            secondary_utility_avg = utils.moving_average(secondary_trainer.utility, MOVING_AVERAGE_WINDOW_SIZE)
 
 
             if primary_trainer.is_coverged(self.pre_epochs) and secondary_trainer.is_coverged(self.pre_epochs):
@@ -179,15 +185,17 @@ class Client():
             # Switch to new model
             if switch_model_flag and both_converged :
                 # boundary check
-                if self.next_freeze_idx >= len(FREEZE_OPTIONS) - 1 or self.base_freeze_idx >= len(FREEZE_OPTIONS) - 1:
+                if secondary_trainer.freeze_idx >= len(FREEZE_OPTIONS) -1 or primary_trainer.freeze_idx >= len(FREEZE_OPTIONS) -1:
                     continue
                 
                 # Use utility function to decide switch model or not
-                if utility_flag and secondary_utility_avg < secondary_utility_avg:
+                if utility_flag and secondary_utility_avg < primary_utility_avg:
                     print(f'Secondary model has better avg. utility: {secondary_utility_avg}')
                     print('copy model#2 to model#1')
 
-                    self.base_freeze_idx  = self.next_freeze_idx
+                    # self.base_freeze_idx  = self.next_freeze_idx
+                    primary_trainer.freeze_idx = secondary_trainer.freeze_idx
+
                     primary_trainer, secondary_trainer = self.switch_model_reverse(secondary_trainer, primary_trainer)
 
                 if not utility_flag and not np.isnan(diff_ma) and diff_ma >= LOSS_DIFF_THRESHOLD:
@@ -195,17 +203,24 @@ class Client():
                     print(f'Loss Diff.: {loss_2-loss_1}, we will copy model#1 to model#2')
 
                     self.loss_diff.clear()
-                    if self.next_freeze_idx >= len(FREEZE_OPTIONS) - 1 or self.base_freeze_idx >= len(FREEZE_OPTIONS) - 1:
-                        continue
-
-                    self.next_freeze_idx  = self.base_freeze_idx
+                    secondary_trainer.freeze_idx = primary_trainer.freeze_idx
                     primary_trainer, secondary_trainer = self.switch_model(primary_trainer, secondary_trainer)
+
 
         print(self.layer_dicisions)
         print(primary_trainer.accuracy)
-        print(primary_trainer.loss)
         print(secondary_trainer.accuracy)
+        print(primary_trainer.loss)
         print(secondary_trainer.loss)
+        print(primary_trainer.utility)
+        print(secondary_trainer.utility)
+
+        
+        print(primary_trainer.total_training_time)
+        print(secondary_trainer.total_training_time)
+        print(primary_trainer.total_trainable_weights)
+        print(secondary_trainer.total_trainable_weights)
+
 
         self.t1 = primary_trainer
         self.t2 = secondary_trainer
@@ -217,7 +232,7 @@ class Client():
         # do some pre-training before freezing
         primary_model = LeNet(self.data.input_shape, self.data.num_classes,
                               "Primary")
-        primary_trainer = Trainer(primary_model, self.data, FREEZE_OPTIONS[self.base_freeze_idx],
+        primary_trainer = Trainer(primary_model, self.data, 0, 
                                   True, False)
         for e in range(self.pre_epochs):
             print(f'[Pre-Training Epoch {e+1}/{self.pre_epochs}]')
@@ -233,7 +248,7 @@ class Client():
         secondary_model = keras.models.clone_model(primary_trainer.get_model())
         secondary_model._name = "Secondary"
         secondary_model.set_weights(primary_model_weights)
-        secondary_trainer = Trainer(secondary_model, self.data, FREEZE_OPTIONS[self.next_freeze_idx],
+        secondary_trainer = Trainer(secondary_model, self.data, INITIAL_FREEZE_LAYERS,
                                     True, False)
 
         for e in range(self.pre_epochs):
@@ -244,7 +259,6 @@ class Client():
         
         return primary_trainer, secondary_trainer
 
-    
 
     def switch_model(self, primary_trainer, secondary_trainer):
         # Assign New "Secondary model" to current primary model
@@ -255,17 +269,20 @@ class Client():
         new_secondary_trainer = Trainer(
             model=new_secondary_model,
             data=self.data,
-            freeze_layers=FREEZE_OPTIONS[self.next_freeze_idx],
+            # freeze_layers=FREEZE_OPTIONS[self.next_freeze_idx],
+            freeze_idx=secondary_trainer.freeze_idx,
             recompile=True,
             old_obj=secondary_trainer)
 
         # New primary model == current "primary model" + 1 more frozen layer
-        self.base_freeze_idx += 1
+        # self.base_freeze_idx += 1
+        primary_trainer.freeze_idx += 1
         primary_trainer.get_model()._name = "Primary"
         new_primary_trainer = Trainer(
             model=primary_trainer.get_model(),
             data=self.data,
-            freeze_layers=FREEZE_OPTIONS[self.base_freeze_idx],
+            # freeze_layers=FREEZE_OPTIONS[self.base_freeze_idx],
+            freeze_idx=primary_trainer.freeze_idx,
             recompile=True,
             old_obj=primary_trainer)
         
@@ -283,7 +300,8 @@ class Client():
         new_dst_trainer = Trainer(
             model=new_dst_model,
             data=self.data,
-            freeze_layers=FREEZE_OPTIONS[self.next_freeze_idx],
+            # freeze_layers=FREEZE_OPTIONS[self.next_freeze_idx],
+            freeze_idx=src_trainer.freeze_idx,
             recompile=True,
             old_obj=dst_trainer)
 
@@ -292,17 +310,27 @@ class Client():
         new_src_trainer = Trainer(
             model=src_trainer.get_model(),
             data=self.data,
-            freeze_layers=FREEZE_OPTIONS[self.base_freeze_idx],
+            # freeze_layers=FREEZE_OPTIONS[self.base_freeze_idx],
+            freeze_idx=dst_trainer.freeze_idx,
             recompile=True,
             old_obj=src_trainer)
         
         return new_dst_trainer, new_src_trainer
+
+    def print_metrics(self):
+        table_header = ['Metric', 'Training time', 'Transmission parameter volume']
+        table_data = [
+            (self.t1.name, self.t1.total_training_time, self.t1.total_trainable_weights),
+            (self.t2.name, self.t2.total_training_time, self.t2.total_trainable_weights),
+        ]
+        print(tabulate.tabulate(table_data, headers=table_header, tablefmt='grid'))
 
     def plot_figure(self):
         myplot.plot(self.t1.accuracy, self.t2.accuracy, "Accuracy",
                     f"Gradually Freezing Accuracy", 1)
         myplot.plot(self.t1.loss, self.t2.loss, "Loss",
                     f"Gradually Freezing Loss", 2)
+        myplot.plot(self.t1.utility, self.t2.utility, "Utility", "Gradually Freezing Utility", 3)
         myplot.show()
 
 
@@ -311,7 +339,10 @@ if __name__ == '__main__':
     os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
     args = opt_parser()
 
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_device)
+
     print('*** Start Training! ***')
+    print(f'GPU Device: {args.gpu_device}')
     start = time.time()
     client_1 = Client()
 
@@ -325,3 +356,4 @@ if __name__ == '__main__':
     print(f'Total training time: {datetime.timedelta(seconds= end-start)}')
 
     client_1.plot_figure()
+    client_1.print_metrics()

@@ -1,4 +1,7 @@
 
+import time
+import datetime
+
 import utils
 from constants import *
 
@@ -17,12 +20,15 @@ from tensorflow.keras import backend as K
 # LOSS_THRESHOLD_ALPHA = 1.2
 
 class Trainer():
-    def __init__(self, model, data, freeze_layers, recompile, old_obj) -> None:
+    def __init__(self, model, data, freeze_idx, recompile, old_obj) -> None:
         self.model = model
         self.data = data
-        self.freeze_layers = freeze_layers
         self.recompile = recompile
         self.name = self.model._name
+        self.total_training_time = datetime.timedelta(seconds=0)
+
+        self.freeze_idx = freeze_idx
+        self.freeze_layers = FREEZE_OPTIONS[freeze_idx]
 
         self.loss = []
         self.loss_delta = []
@@ -30,6 +36,7 @@ class Trainer():
         self.cur_layer_weight = []
 
         self.utility = []
+        self.total_trainable_weights = 0
 
         if self.recompile:
             for l in range(self.freeze_layers):
@@ -48,9 +55,13 @@ class Trainer():
             self.loss_delta = old_obj.loss_delta
             self.accuracy = old_obj.accuracy
             self.cur_layer_weight = old_obj.cur_layer_weight
+            self.utility = old_obj.utility
+            self.total_training_time = old_obj.total_training_time
+            self.total_trainable_weights = old_obj.total_trainable_weights
 
     def train_epoch(self):
         # train each batch
+        epoch_start = time.time()
         for x, y in zip(self.data.x_train_batch, self.data.y_train_batch):
             self.model.train_on_batch(x, y)
 
@@ -60,6 +71,10 @@ class Trainer():
                                              )
         # lr = K.get_value(self.model.optimizer._decayed_lr(tf.float32))
         # print(f"Learning rate: {lr}")
+        epoch_end = time.time()
+        elapsed_time = datetime.timedelta(seconds= epoch_end-epoch_start)
+        self.total_training_time += elapsed_time
+        print(f'[Model {self.name}] Epoch training time: {elapsed_time}')
 
         self.save_loss_delta(loss)
         self.loss.append(loss)
@@ -97,9 +112,11 @@ class Trainer():
         for _, layer in enumerate(self.model.layers):
             if layer.trainable == False:
                 frozen_weights_cnt += layer.count_params()
-        print(f'[Model {self.name}] Total parameters: {total_weights_cnt}, Frozen parameters: {frozen_weights_cnt}')
-        
         frozen_ratio = (frozen_weights_cnt) / total_weights_cnt
+        print(f'[Model {self.name}] Total parameters: {total_weights_cnt}, Frozen parameters: {frozen_weights_cnt}')
+        print(f'[Model {self.name}] Frozen parameter ratio: {frozen_ratio}')
+        self.total_trainable_weights += total_weights_cnt-frozen_weights_cnt
+
         return frozen_weights_cnt, frozen_ratio
     
     def get_model_utility(self, frozen_params_ratio):

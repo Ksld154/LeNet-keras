@@ -1,4 +1,5 @@
 import matplotlib.pyplot as plt
+import datetime
 
 
 def old_plot():
@@ -95,6 +96,8 @@ baseline_2 = [None, None, 0.45739999413490295, 0.47099998593330383, 0.4828999936
 switch_primary = [0.3172000050544739, 0.3977000117301941, 0.4487999975681305, 0.4747999906539917, 0.4909999966621399, 0.5065000057220459, 0.5253999829292297, 0.5370000004768372, 0.5444999933242798, 0.5497999787330627, 0.557200014591217, 0.5652999877929688, 0.5715000033378601, 0.5723999738693237, 0.578499972820282, 0.5784000158309937, 0.5792999863624573]
 switch_secondary = [None, None, 0.43549999594688416, 0.4481000006198883, 0.4578000009059906, 0.46549999713897705, 0.46970000863075256, 0.475600004196167, 0.4790000021457672, 0.5461000204086304, 0.5565000176429749, 0.5638999938964844, 0.5723000168800354, 0.5759999752044678, 0.5796999931335449, 0.5853999853134155, 0.5874000191688538]
 
+baseline_primary_utility = [0.26768045425415044, 0.21448819637298588, 0.17180137634277348, 0.13456492424011235, 0.09925751686096196, 0.07878153324127202, 0.05484144687652592, 0.036115932464599654, 0.02240507602691655, 0.012001681327819869, 0.0016428709030151811, 1e-06, 1e-06, 1e-06, 1e-06]
+baseline_secondary_utility = [0.06941218376159669, 0.060230624675750744, 0.05437732934951783, 0.05000625252723695, 0.04614434838294984, 0.043193531036376964, 0.04075388312339784, 0.038535577058792125, 0.03673754334449769, 0.034964632987976085, 0.033387672901153576, 0.031994086503982555, 0.03073103427886964, 0.029638183116912853, 0.028450828790664684]
 
 def offline_plot(idx, title, y_title):
     plt.figure(idx)
@@ -123,9 +126,27 @@ def plot(data1, data2, y_label, title, idx):
     plt.title(title)
     plt.ylabel(y_label)  # y label
     plt.xlabel("Epochs")  # x label
+    
+    if idx == 1:
+        plt.plot(baseline_1,
+                label='Baseline: No freeze',
+                marker="o",
+                linestyle="--")
+        plt.plot(baseline_2, label='Baseline: Freeze first 3 layers',marker="o", linestyle="--")
+    elif idx == 3:
+        plt.plot(baseline_primary_utility,
+            label='Baseline: No freeze',
+            marker="o",
+            linestyle="--")
+        plt.plot(baseline_secondary_utility, label='Baseline: Freeze first 3 layers',marker="o", linestyle="--")
+    
     plt.plot(data1, label='Primary', marker="o", linestyle="-")
     plt.plot(data2, label='Secondary', marker="o", linestyle="-")
     plt.legend()
+    
+    now = datetime.datetime.now()
+    dt_string = now.strftime("%m-%d-%Y_%H:%M:%S")
+    plt.savefig(f'{title}_{dt_string}.png')
 
 
 def show():
