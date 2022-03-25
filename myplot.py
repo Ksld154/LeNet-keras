@@ -1,5 +1,6 @@
 import matplotlib.pyplot as plt
 import datetime
+import os
 
 
 def old_plot():
@@ -120,6 +121,7 @@ def offline_plot(idx, title, y_title):
     plt.legend()
 
 
+
 def plot(data1, data2, y_label, title, idx):
 
     plt.figure(idx)
@@ -133,20 +135,30 @@ def plot(data1, data2, y_label, title, idx):
                 marker="o",
                 linestyle="--")
         plt.plot(baseline_2, label='Baseline: Freeze first 3 layers',marker="o", linestyle="--")
-    elif idx == 3:
-        plt.plot(baseline_primary_utility,
-            label='Baseline: No freeze',
-            marker="o",
-            linestyle="--")
-        plt.plot(baseline_secondary_utility, label='Baseline: Freeze first 3 layers',marker="o", linestyle="--")
+    # elif idx == 3:
+    #     plt.plot(baseline_primary_utility,
+    #         label='Baseline: No freeze',
+    #         marker="o",
+    #         linestyle="--")
+    #     plt.plot(baseline_secondary_utility, label='Baseline: Freeze first 3 layers',marker="o", linestyle="--")
     
     plt.plot(data1, label='Primary', marker="o", linestyle="-")
     plt.plot(data2, label='Secondary', marker="o", linestyle="-")
     plt.legend()
-    
+
+
+def save_figure(title):    
     now = datetime.datetime.now()
     dt_string = now.strftime("%m-%d-%Y_%H:%M:%S")
-    plt.savefig(f'{title}_{dt_string}.png')
+
+    script_dir = os.path.dirname(__file__)
+    results_dir = os.path.join(script_dir, 'results/')
+    if not os.path.isdir(results_dir):
+        os.makedirs(results_dir)
+
+    image_filename = title + "_" + dt_string + ".png"
+    plt.savefig(results_dir+image_filename)
+    # plt.savefig(f'{title}_{dt_string}.png')
 
 
 def show():

@@ -63,7 +63,8 @@ class Trainer():
         # train each batch
         epoch_start = time.time()
         for x, y in zip(self.data.x_train_batch, self.data.y_train_batch):
-            self.model.train_on_batch(x, y)
+            y_pred = self.model.train_on_batch(x, y)
+            # print(y_pred)
 
         loss, accuracy = self.model.evaluate(self.data.x_test,
                                              self.data.y_test,
@@ -80,6 +81,31 @@ class Trainer():
         self.loss.append(loss)
         self.accuracy.append(accuracy)
         return loss, accuracy
+    
+    def train_epoch_fit(self):
+        # train each batch
+        epoch_start = time.time()
+        train_result = self.model.fit(self.data.x_train, self.data.y_train,epochs=1)
+        train_loss = train_result.history['loss'][0]
+        print(train_loss)
+        # print(train_result.history)
+
+        loss, accuracy = self.model.evaluate(self.data.x_test,
+                                             self.data.y_test,
+                                             batch_size=BATCH_SIZE,
+                                             )
+        # lr = K.get_value(self.model.optimizer._decayed_lr(tf.float32))
+        # print(f"Learning rate: {lr}")
+        epoch_end = time.time()
+        elapsed_time = datetime.timedelta(seconds= epoch_end-epoch_start)
+        self.total_training_time += elapsed_time
+        print(f'[Model {self.name}] Epoch training time: {elapsed_time}')
+
+        self.save_loss_delta(loss)
+        self.loss.append(loss)
+        self.accuracy.append(accuracy)
+        return loss, accuracy
+
 
     def save_layer_weights(self, current_layer_idx):
         current_layer_weights = self.model.get_weights()[
@@ -126,9 +152,13 @@ class Trainer():
         
         model_utility = 0
         if not model_loss_satisfied:
-            model_utility = (cur_loss-LOSS_THRESHOLD * LOSS_THRESHOLD_ALPHA) / frozen_params_ratio
+            # model_utility = (cur_loss-LOSS_THRESHOLD * LOSS_THRESHOLD_ALPHA) / frozen_params_ratio
+            if self.freeze_idx != 0:
+                model_utility = (cur_loss-LOSS_THRESHOLD * LOSS_THRESHOLD_ALPHA) ** (self.freeze_idx*MAGIC_ALPHA)
+            else: 
+                model_utility = (cur_loss-LOSS_THRESHOLD * LOSS_THRESHOLD_ALPHA)
         else:
-            model_utility = 1e-6 / frozen_params_ratio
+            model_utility = 1e-7 / frozen_params_ratio
 
         return model_utility
 

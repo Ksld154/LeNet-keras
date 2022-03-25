@@ -1,4 +1,4 @@
-from data import CIFAR10
+from data import CIFAR10, CIFAR10_RAW
 from lenet import LeNet
 from transmitter import Transmitter
 from trainer import Trainer
@@ -15,19 +15,6 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import tensorflow.keras as keras
 import tabulate 
-# import tensorflow as tf
-# from tensorflow.keras import backend as K
-
-# os.environ["CUDA_VISIBLE_DEVICES"] = "3"
-
-# BATCH_SIZE = 64
-# PRE_EPOCHS = 2
-# TENSOR_TRANSMISSION_TIME = 30
-# FREEZE_OPTIONS = [0, 2, 4, 6, 7]
-# MOVING_AVERAGE_WINDOW_SIZE = 7
-
-# LOSS_DIFF_THRESHOLD = 0.05
-# INITIAL_FREEZE_LAYERS = 3
 
 
 def opt_parser():
@@ -79,12 +66,17 @@ def opt_parser():
                         action=argparse.BooleanOptionalAction)
 
     parser.add_argument('-g',
-                    '--gpu',
-                    default=3,
-                    dest='gpu_device',
-                    help='Specify which gpu device to use (default: %(default)s)',
-                    type=int)
-
+                        '--gpu',
+                        default=3,
+                        dest='gpu_device',
+                        help='Specify which gpu device to use (default: %(default)s)',
+                        type=int)
+    parser.add_argument('-f',
+                        '--force-switch',
+                        default=0,
+                        dest='force_switch_epoch',
+                        type=int,
+                        help='Force to switch model at specific epoch (default: %(default)s)')
 
     return parser.parse_args()
 
@@ -92,8 +84,10 @@ def opt_parser():
 class Client():
     def __init__(self) -> None:
         self.data = CIFAR10(BATCH_SIZE)
+        # self.data = CIFAR10_RAW()
+
         self.layer_dicisions = []
-        self.loss_diff = []
+        self.loss_delta = []
 
         self.epochs = 10
         self.pre_epochs = PRE_EPOCHS
@@ -102,14 +96,18 @@ class Client():
         self.t2 = ''
 
     def train_process(self, transmission_overlap, dry_run, transmission_time,
-                      epochs, switch_model_flag, utility_flag):
+                      epochs, switch_model_flag, utility_flag, force_switch_epoch):
 
-        print(f'Overlap: {transmission_overlap}')
-        print(f'Dry_run: {dry_run}')
-        print(f'Total epochs: {epochs}')
-        print(f'Switch model: {switch_model_flag}')
-        print(f'Utility: {utility_flag}')
-
+        table_header = ['Flags', 'Status']
+        table_data = [
+            ('Overlap', transmission_overlap),
+            ('Dry_run', dry_run),
+            ('Total epochs', epochs),
+            ('Switch model', switch_model_flag),
+            ('Utility', utility_flag),
+            ('Force switch epoch', force_switch_epoch)
+        ]
+        print(tabulate.tabulate(table_data, headers=table_header, tablefmt='grid'))
 
         self.epochs = epochs
         both_converged = False
@@ -124,6 +122,8 @@ class Client():
             
             # pass base_loss to central server?
             loss_1, _ = primary_trainer.train_epoch()
+            # loss_1, _ = primary_trainer.train_epoch_fit()
+            
 
             if transmission_overlap:
                 print(f'[BG] Starting Transmitting tensors...')
@@ -151,6 +151,8 @@ class Client():
             else:
                 # train target model first
                 loss_2, _ = secondary_trainer.train_epoch()
+                # loss_2, _ = secondary_trainer.train_epoch_fit()
+
 
                 # simulate transmission only after target model training is finished
                 print(f'[FG] Starting Transmitting tensors...')
@@ -161,18 +163,19 @@ class Client():
             
             self.layer_dicisions.append(primary_trainer.freeze_idx)
 
-            self.loss_diff.append(loss_2 - loss_1)
-            diff_ma = utils.moving_average(self.loss_diff, MOVING_AVERAGE_WINDOW_SIZE)
-            print(f'Loss Difference: {diff_ma}')
+            self.loss_delta.append(loss_2 - loss_1)
+            models_loss_diff = utils.moving_average(self.loss_delta, MOVING_AVERAGE_WINDOW_SIZE)
+            print(f'Loss Difference: {models_loss_diff}')
 
-            primary_frozen_params, primary_frozen_ratio = primary_trainer.get_frozen_ratio()
-            secondary_frozen_params, secondary_frozen_ratio = secondary_trainer.get_frozen_ratio()
-            primary_utility = primary_trainer.get_model_utility(primary_trainer.freeze_idx+1)
-            secondary_utility = secondary_trainer.get_model_utility(secondary_trainer.freeze_idx+1)
-            primary_trainer.utility.append(primary_utility)
-            secondary_trainer.utility.append(secondary_utility)
-            print(f'Primary Utility: {primary_utility}')
-            print(f'Secondary Utility: {secondary_utility}')
+            if utility_flag:
+                # primary_frozen_params, primary_frozen_ratio = primary_trainer.get_frozen_ratio()
+                # secondary_frozen_params, secondary_frozen_ratio = secondary_trainer.get_frozen_ratio()
+                primary_utility = primary_trainer.get_model_utility(primary_trainer.freeze_idx+1)
+                secondary_utility = secondary_trainer.get_model_utility(secondary_trainer.freeze_idx+1)
+                primary_trainer.utility.append(primary_utility)
+                secondary_trainer.utility.append(secondary_utility)
+                print(f'Primary Utility: {primary_utility}')
+                print(f'Secondary Utility: {secondary_utility}')
             
             primary_utility_avg = utils.moving_average(primary_trainer.utility, MOVING_AVERAGE_WINDOW_SIZE)
             secondary_utility_avg = utils.moving_average(secondary_trainer.utility, MOVING_AVERAGE_WINDOW_SIZE)
@@ -182,29 +185,52 @@ class Client():
                 print('*** Both model are converged! ***')
                 both_converged = True
             
+
+            ### Expriment: force switch model ###
+            if force_switch_epoch > 0 and e == force_switch_epoch-1:
+                if switch_model_flag and not utility_flag:
+                    print(f'Force switch model at epoch: {e+1}')
+                    self.loss_delta.clear()
+                    secondary_trainer.freeze_idx = primary_trainer.freeze_idx
+                    primary_trainer, secondary_trainer = self.switch_model(primary_trainer, secondary_trainer, True)
+                    continue
+
             # Switch to new model
-            if switch_model_flag and both_converged :
+            if switch_model_flag and both_converged and force_switch_epoch==0:
+                
                 # boundary check
                 if secondary_trainer.freeze_idx >= len(FREEZE_OPTIONS) -1 or primary_trainer.freeze_idx >= len(FREEZE_OPTIONS) -1:
                     continue
                 
                 # Use utility function to decide switch model or not
                 if utility_flag and secondary_utility_avg < primary_utility_avg:
+                    print(f'Avg primary utility: {primary_utility_avg}')
+                    print(f'Avg secondary utility: {secondary_utility_avg}')
+
                     print(f'Secondary model has better avg. utility: {secondary_utility_avg}')
                     print('copy model#2 to model#1')
 
                     # self.base_freeze_idx  = self.next_freeze_idx
                     primary_trainer.freeze_idx = secondary_trainer.freeze_idx
-
                     primary_trainer, secondary_trainer = self.switch_model_reverse(secondary_trainer, primary_trainer)
 
-                if not utility_flag and not np.isnan(diff_ma) and diff_ma >= LOSS_DIFF_THRESHOLD:
+                elif utility_flag and primary_utility_avg < secondary_utility_avg:
+                    print(f'Avg primary utility: {primary_utility_avg}')
+                    print(f'Avg secondary utility: {secondary_utility_avg}')
+                    print(f'Primary model has better avg. utility: {primary_utility_avg}')
+                    print('copy model#1 to model#2')
+                    secondary_trainer.freeze_idx = primary_trainer.freeze_idx
+                    secondary_trainer, primary_trainer = self.switch_model_reverse(primary_trainer, secondary_trainer)
+
+
+
+                if not utility_flag and not np.isnan(models_loss_diff) and models_loss_diff >= LOSS_DIFF_THRESHOLD:
                     print(f'Loss Diff.: {loss_2-loss_1}, is bigger than threshold, which means model#2 is bad')
                     print(f'Loss Diff.: {loss_2-loss_1}, we will copy model#1 to model#2')
 
-                    self.loss_diff.clear()
+                    self.loss_delta.clear()
                     secondary_trainer.freeze_idx = primary_trainer.freeze_idx
-                    primary_trainer, secondary_trainer = self.switch_model(primary_trainer, secondary_trainer)
+                    primary_trainer, secondary_trainer = self.switch_model(primary_trainer, secondary_trainer, False)
 
 
         print(self.layer_dicisions)
@@ -237,6 +263,8 @@ class Client():
         for e in range(self.pre_epochs):
             print(f'[Pre-Training Epoch {e+1}/{self.pre_epochs}]')
             primary_trainer.train_epoch()
+            # primary_trainer.train_epoch_fit()
+
             primary_trainer.cur_layer_weight.append(None)
         if dry_run:
             print(primary_trainer.accuracy)
@@ -260,7 +288,7 @@ class Client():
         return primary_trainer, secondary_trainer
 
 
-    def switch_model(self, primary_trainer, secondary_trainer):
+    def switch_model(self, primary_trainer, secondary_trainer, keep_primary):
         # Assign New "Secondary model" to current primary model
         primary_weights = primary_trainer.get_model().get_weights()
         new_secondary_model = keras.models.clone_model(primary_trainer.get_model())
@@ -273,6 +301,9 @@ class Client():
             freeze_idx=secondary_trainer.freeze_idx,
             recompile=True,
             old_obj=secondary_trainer)
+
+        if keep_primary:
+            return primary_trainer, new_secondary_trainer
 
         # New primary model == current "primary model" + 1 more frozen layer
         # self.base_freeze_idx += 1
@@ -325,12 +356,19 @@ class Client():
         ]
         print(tabulate.tabulate(table_data, headers=table_header, tablefmt='grid'))
 
-    def plot_figure(self):
+    def plot_figure(self, utility_flag):
         myplot.plot(self.t1.accuracy, self.t2.accuracy, "Accuracy",
                     f"Gradually Freezing Accuracy", 1)
+        myplot.save_figure("Gradually Freezing Accuracy")
+
         myplot.plot(self.t1.loss, self.t2.loss, "Loss",
                     f"Gradually Freezing Loss", 2)
-        myplot.plot(self.t1.utility, self.t2.utility, "Utility", "Gradually Freezing Utility", 3)
+        myplot.save_figure(f"Gradually Freezing Loss")
+        
+        if utility_flag:
+            myplot.plot(self.t1.utility, self.t2.utility, "Utility", "Gradually Freezing Utility", 3)
+            myplot.save_figure(f"Gradually Freezing Utility")
+        
         myplot.show()
 
 
@@ -351,9 +389,10 @@ if __name__ == '__main__':
                            transmission_time=args.transmission_time,
                            epochs=args.epochs,
                            switch_model_flag=args.switch_model,
-                           utility_flag=args.utility_flag)
+                           utility_flag=args.utility_flag,
+                           force_switch_epoch=args.force_switch_epoch)
     end = time.time()
     print(f'Total training time: {datetime.timedelta(seconds= end-start)}')
 
-    client_1.plot_figure()
+    client_1.plot_figure(args.utility_flag)
     client_1.print_metrics()
