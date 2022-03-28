@@ -34,6 +34,7 @@ class Trainer():
         self.loss_delta = []
         self.accuracy = []
         self.cur_layer_weight = []
+        self.layer_history = []
 
         self.utility = []
         self.total_trainable_weights = 0
@@ -58,6 +59,8 @@ class Trainer():
             self.utility = old_obj.utility
             self.total_training_time = old_obj.total_training_time
             self.total_trainable_weights = old_obj.total_trainable_weights
+            self.layer_history = old_obj.layer_history
+
 
     def train_epoch(self):
         # train each batch
@@ -80,6 +83,7 @@ class Trainer():
         self.save_loss_delta(loss)
         self.loss.append(loss)
         self.accuracy.append(accuracy)
+        self.layer_history.append(self.freeze_idx)
         return loss, accuracy
     
     def train_epoch_fit(self):
@@ -130,7 +134,7 @@ class Trainer():
 
     def get_model(self):
         return self.model
-   
+    
     def get_frozen_ratio(self):
         total_weights_cnt = self.model.count_params()
 
@@ -139,8 +143,8 @@ class Trainer():
             if layer.trainable == False:
                 frozen_weights_cnt += layer.count_params()
         frozen_ratio = (frozen_weights_cnt) / total_weights_cnt
-        print(f'[Model {self.name}] Total parameters: {total_weights_cnt}, Frozen parameters: {frozen_weights_cnt}')
-        print(f'[Model {self.name}] Frozen parameter ratio: {frozen_ratio}')
+        # print(f'[Model {self.name}] Total parameters: {total_weights_cnt}, Frozen parameters: {frozen_weights_cnt}')
+        # print(f'[Model {self.name}] Frozen parameter ratio: {frozen_ratio}')
         self.total_trainable_weights += total_weights_cnt-frozen_weights_cnt
 
         return frozen_weights_cnt, frozen_ratio
@@ -162,9 +166,30 @@ class Trainer():
 
         return model_utility
 
-    def is_coverged(self, pre_epochs):
+    def is_converged(self, pre_epochs):
         delta_ma = utils.moving_average(self.loss_delta[pre_epochs:], MOVING_AVERAGE_WINDOW_SIZE)
         if not np.isnan(delta_ma) and delta_ma <= LOSS_COVERGED_THRESHOLD:
             return True
         else:
             return False
+
+    def further_freeze(self, pre_epochs):
+        if self.is_converged(pre_epochs):
+            if self.freeze_idx >= len(FREEZE_OPTIONS) -1:
+                return self
+            
+            print(f"Model {self.name} is converge, will advance to next freezing degree{self.freeze_idx+1}")
+            self.freeze_idx += 1
+            old_weights = self.get_model().get_weights()
+            new_model = keras.models.clone_model(self.get_model())
+            new_model.set_weights(old_weights)
+            new_trainer = Trainer(new_model, self.data, self.freeze_idx, True, self)
+            new_trainer.set_model_name(f"Frozen_degree_{self.freeze_idx+1}")
+            new_trainer.loss_delta.clear()
+        
+            return new_trainer
+        
+        return self
+
+    def set_model_name(self, new_model_name):
+        self.model._name = new_model_name
