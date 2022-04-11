@@ -26,7 +26,7 @@ class TxtPlot():
             for row in file:
                 row = ast.literal_eval(row)
                 self.result.append(row)
-        
+        # print(self.result)
         return self.result
 
     def plot_figure(self, parsed_txt_data, figure_idx):
@@ -63,7 +63,6 @@ if __name__ == '__main__':
     plot_obj.txt_parser()
     plot_obj.plot_figure(plot_obj.result, 1)
 
-
     filename2 = ''
     if 'accuracy' in filename:
         filename2 = filename.replace('accuracy', 'loss', 1)
@@ -72,6 +71,6 @@ if __name__ == '__main__':
     
     plot_obj2 = TxtPlot(filename2)
     plot_obj2.txt_parser()
-    plot_obj2.plot_figure(plot_obj.result, 2)
+    plot_obj2.plot_figure(plot_obj2.result, 2)
 
     plt.show()
