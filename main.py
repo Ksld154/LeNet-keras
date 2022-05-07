@@ -181,7 +181,7 @@ class Client():
             secondary_utility_avg = utils.moving_average(secondary_trainer.utility, MOVING_AVERAGE_WINDOW_SIZE)
 
 
-            if primary_trainer.is_coverged(self.pre_epochs) and secondary_trainer.is_coverged(self.pre_epochs):
+            if primary_trainer.is_converged(self.pre_epochs) and secondary_trainer.is_converged(self.pre_epochs):
                 print('*** Both model are converged! ***')
                 both_converged = True
             

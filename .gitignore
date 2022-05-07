@@ -4,3 +4,4 @@ venv/
 results/
 
 *.png
+model_search_results/*.txt

@@ -53,14 +53,14 @@ class Trainer():
                                metrics=['accuracy'])
             # self.model.summary()
         if old_obj:
-            self.loss = old_obj.loss
-            self.loss_delta = old_obj.loss_delta
-            self.accuracy = old_obj.accuracy
-            self.cur_layer_weight = old_obj.cur_layer_weight
-            self.utility = old_obj.utility
-            self.total_training_time = old_obj.total_training_time
-            self.total_trainable_weights = old_obj.total_trainable_weights
-            self.layer_history = old_obj.layer_history
+            self.loss = copy.deepcopy(old_obj.loss)
+            self.loss_delta = copy.deepcopy(old_obj.loss_delta)
+            self.accuracy = copy.deepcopy(old_obj.accuracy)
+            self.cur_layer_weight = copy.deepcopy(old_obj.cur_layer_weight)
+            self.utility = copy.deepcopy(old_obj.utility)
+            self.total_training_time = copy.deepcopy(old_obj.total_training_time)
+            self.total_trainable_weights = copy.deepcopy(old_obj.total_trainable_weights)
+            self.layer_history = copy.deepcopy(old_obj.layer_history)
 
 
     def train_epoch(self):
@@ -150,7 +150,7 @@ class Trainer():
 
         return frozen_weights_cnt, frozen_ratio
     
-    def get_model_utility(self, frozen_params_ratio):
+    def get_model_utility(self, frozen_layers):
         cur_loss = self.loss[-1]
         model_loss_satisfied = True if cur_loss <= LOSS_THRESHOLD * LOSS_THRESHOLD_ALPHA else False
         print(model_loss_satisfied) 
@@ -158,12 +158,12 @@ class Trainer():
         model_utility = 0
         if not model_loss_satisfied:
             # model_utility = (cur_loss-LOSS_THRESHOLD * LOSS_THRESHOLD_ALPHA) / frozen_params_ratio
-            if self.freeze_idx != 0:
-                model_utility = (cur_loss-LOSS_THRESHOLD * LOSS_THRESHOLD_ALPHA) ** (self.freeze_idx*MAGIC_ALPHA)
+            if frozen_layers != 0:
+                model_utility = (cur_loss-LOSS_THRESHOLD * LOSS_THRESHOLD_ALPHA) ** (frozen_layers*MAGIC_ALPHA)
             else: 
                 model_utility = (cur_loss-LOSS_THRESHOLD * LOSS_THRESHOLD_ALPHA)
         else:
-            model_utility = 1e-7 / frozen_params_ratio
+            model_utility = 1e-7 / frozen_layers
 
         return model_utility
 
@@ -175,8 +175,8 @@ class Trainer():
         else:
             return False
 
-    def further_freeze(self, pre_epochs):
-        if self.is_converged(pre_epochs):
+    def further_freeze(self, pre_epochs, force_freeze):
+        if force_freeze or self.is_converged(pre_epochs):
             if self.freeze_idx >= len(FREEZE_OPTIONS) -1:
                 return self
             
@@ -193,6 +193,21 @@ class Trainer():
         
         return self
     
+    def static_further_freeze(self, freeze_idx):
+        print(f"Model {self.name} is set to freezing degree: {freeze_idx}")
+
+        old_weights = self.get_model().get_weights()
+        new_model = keras.models.clone_model(self.get_model())
+        new_model.set_weights(old_weights)
+
+        new_trainer = Trainer(new_model, self.data, freeze_idx, True, False)
+        new_trainer.set_model_name(f"Frozen_degree_{freeze_idx}")
+        new_trainer.loss_delta.clear()
+    
+        return new_trainer
+        
+
+
     # generate a secondary trainer object that freeze 1 layer deeper than primary trainer
     def generate_further_freeze_trainer(self, old_secondary_trainer):
         if self.freeze_idx >= len(FREEZE_OPTIONS) -1:
