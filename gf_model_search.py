@@ -422,7 +422,7 @@ class Client():
             os.makedirs(results_dir)
         
         now = datetime.datetime.now()
-        dt_string = now.strftime("%m-%d-%Y_%H:%M:%S")
+        dt_string = now.strftime("%m-%d-%Y_%H%M%S")
         
         # filename = f'model_search_accuracy_{dt_string}.txt'
         # filepath = results_dir+filename

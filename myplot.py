@@ -170,7 +170,7 @@ def plot(data1, data2, y_label, title, idx):
 
 def save_figure(title):    
     now = datetime.datetime.now()
-    dt_string = now.strftime("%m-%d-%Y_%H:%M:%S")
+    dt_string = now.strftime("%m-%d-%Y_%H%M%S")
 
     script_dir = os.path.dirname(__file__)
     results_dir = os.path.join(script_dir, 'results/')

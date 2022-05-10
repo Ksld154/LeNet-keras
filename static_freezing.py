@@ -127,7 +127,7 @@ class Client():
 
 
     def train_all_static_freeze_model(self, pretrained_trainer):
-        pretrained_acc = copy.deepcopy(pretrained_trainer.accuracy)
+        # pretrained_acc = copy.deepcopy(pretrained_trainer.accuracy)
         for i in range(4):
 
             new_trainer = pretrained_trainer.static_further_freeze(i)

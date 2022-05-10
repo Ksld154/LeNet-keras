@@ -79,7 +79,7 @@ class Trainer():
         epoch_end = time.time()
         elapsed_time = datetime.timedelta(seconds= epoch_end-epoch_start)
         self.total_training_time += elapsed_time
-        print(f'[Model {self.name}] Epoch training time: {elapsed_time}')
+        print(f'[Trainer {self.name}] Epoch training time: {elapsed_time}')
 
         self.save_loss_delta(loss)
         self.loss.append(loss)
@@ -104,7 +104,7 @@ class Trainer():
         epoch_end = time.time()
         elapsed_time = datetime.timedelta(seconds= epoch_end-epoch_start)
         self.total_training_time += elapsed_time
-        print(f'[Model {self.name}] Epoch training time: {elapsed_time}')
+        print(f'[Trainer {self.name}] Epoch training time: {elapsed_time}')
 
         self.save_loss_delta(loss)
         self.loss.append(loss)
@@ -167,9 +167,9 @@ class Trainer():
 
         return model_utility
 
-    def is_converged(self, pre_epochs):
-        delta_ma = utils.moving_average(self.loss_delta[pre_epochs:], MOVING_AVERAGE_WINDOW_SIZE)
-        print(f'Model {self.name} loss delta: {delta_ma}')
+    def is_converged(self, pre_epochs=3, window_size=MOVING_AVERAGE_WINDOW_SIZE):
+        delta_ma = utils.moving_average(self.loss_delta[pre_epochs:], window_size)
+        print(f'Trainer {self.name} loss delta: {delta_ma}')
         if not np.isnan(delta_ma) and delta_ma <= LOSS_COVERGED_THRESHOLD:
             return True
         else:
@@ -180,13 +180,15 @@ class Trainer():
             if self.freeze_idx >= len(FREEZE_OPTIONS) -1:
                 return self
             
-            print(f"Model {self.name} is converge, will advance to next freezing degree{self.freeze_idx+1}")
+            print(f"Trainer {self.name} is converge, will advance to next freezing degree{self.freeze_idx+1}")
             self.freeze_idx += 1
             old_weights = self.get_model().get_weights()
             new_model = keras.models.clone_model(self.get_model())
             new_model.set_weights(old_weights)
             new_trainer = Trainer(new_model, self.data, self.freeze_idx, True, self)
             new_trainer.set_model_name(f"Frozen_degree_{self.freeze_idx+1}")
+            new_trainer.name = self.name
+
             new_trainer.loss_delta.clear()
         
             return new_trainer
@@ -202,6 +204,7 @@ class Trainer():
 
         new_trainer = Trainer(new_model, self.data, freeze_idx, True, False)
         new_trainer.set_model_name(f"Frozen_degree_{freeze_idx}")
+        new_trainer.name = self.name
         new_trainer.loss_delta.clear()
     
         return new_trainer
@@ -210,21 +213,26 @@ class Trainer():
 
     # generate a secondary trainer object that freeze 1 layer deeper than primary trainer
     def generate_further_freeze_trainer(self, old_secondary_trainer):
-        if self.freeze_idx >= len(FREEZE_OPTIONS) -1:
-            return copy.deepcopy(self)
+        # if self.freeze_idx >= len(FREEZE_OPTIONS) -1:
+        #     return copy.deepcopy(self)
             
-        print(f"Generate a secondary model with freezing degree{self.freeze_idx+1} from primary trainer")
+        
         new_freeze_idx = self.freeze_idx+1
+        if self.freeze_idx >= len(FREEZE_OPTIONS) -1:
+            new_freeze_idx = self.freeze_idx
+        print(f"Generate a secondary model with freezing degree={new_freeze_idx} from primary trainer")
+        
         old_weights = self.get_model().get_weights()
         new_model = keras.models.clone_model(self.get_model())
         new_model.set_weights(old_weights)
         
         new_trainer = Trainer(new_model, self.data, new_freeze_idx, True, old_secondary_trainer)
         new_trainer.set_model_name(f"Frozen_degree_{new_freeze_idx}")
+        new_trainer.name = "Gradually Freezing: Secondary Model"
         # new_trainer.loss_delta.clear()
     
         return new_trainer
     
     def set_model_name(self, new_model_name):
         self.model._name = new_model_name
-        self.name = new_model_name
+        # self.name = new_model_name

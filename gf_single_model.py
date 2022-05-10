@@ -438,7 +438,7 @@ class Client():
         
         for degree in range(len(FREEZE_OPTIONS)-1):
             frozen_degree = degree+1
-            frozen_degree = primary_trainer.get
+            # frozen_degree = primary_trainer.get
             old_weights = primary_trainer.get_model().get_weights()
             new_model = keras.models.clone_model(primary_trainer.get_model())
             new_model.set_weights(old_weights)
@@ -460,7 +460,7 @@ class Client():
             os.makedirs(results_dir)
         
         now = datetime.datetime.now()
-        dt_string = now.strftime("%m-%d-%Y_%H:%M:%S")
+        dt_string = now.strftime("%m-%d-%Y_%H%M%S")
         
         # filename = f'model_search_accuracy_{dt_string}.txt'
         # filepath = results_dir+filename
